@@ -42,19 +42,26 @@ SYSTEM_PROMPT = (
 )
 
 EXPLANATION_JSON_SCHEMA = """{
-  "headline": "One short sentence describing the overall anomaly pattern.",
-  "summary": "2-3 plain-language sentences explaining what is generally happening.",
-  "why_it_happened": ["pattern-based reason 1", "pattern-based reason 2", "pattern-based reason 3"],
+  "headline": "One short sentence describing the overall anomaly pattern in plain, general terms.",
+  "summary": "2-3 plain-language sentences describing what is generally happening -- no timestamps, counts, or exact figures.",
+  "why_it_happened": ["general pattern-based reason 1", "general pattern-based reason 2", "general pattern-based reason 3"],
   "when_occurred": {
-    "time_pattern": "The date/time range in scope, and whether anomalies cluster during daylight/night or particular hours -- only if supported by evidence.",
-    "duration_pattern": "The persistent-event count and typical/shortest/longest duration, using the supplied event statistics.",
-    "operating_pattern": "Recurring operating-condition patterns (status, communication, daylight), only if supported by evidence."
+    "time_pattern": "A general description of when this tends to happen (e.g. 'mostly during high-load daylight hours'), only if supported by evidence. No specific dates or clock times.",
+    "duration_pattern": "A general sense of how long or how often this tends to happen (e.g. 'lasts around an hour' or 'happens occasionally'), only if supported by evidence. Avoid exact counts or precise minute figures.",
+    "operating_pattern": "Recurring operating-condition patterns (status, communication, daylight), described generally, only if supported by evidence."
   },
   "recommended_actions": ["practical operator check 1", "practical operator check 2", "practical operator check 3"]
 }"""
 
 EXPLANATION_RULES = """Rules:
-- Use only the evidence below; never invent measurements, dates, or counts.
+- Write like a plant operator summarizing a pattern to a colleague, not like a data
+  report. Describe trends and tendencies in general, qualitative language.
+- Do NOT cite exact event counts, timestamps, dates, or precise durations (e.g. never
+  say "2 persistent events" or "62.4 minutes" or "from 2026-01-01 08:20"). If a duration
+  or frequency is worth mentioning, round it to something conversational ("about an
+  hour", "a handful of times", "briefly") instead of an exact figure.
+- Use only the evidence below to decide what pattern to describe; never invent a
+  measurement, date, or count -- just don't restate the raw numbers themselves.
 - Feature contributions show variables associated with unusual reconstruction error --
   they do not prove physical root cause. Never say "root cause" or "caused by".
 - Never call anomaly_score_ratio or reconstruction_error a probability or confidence value.
@@ -198,10 +205,10 @@ def _check_event_count(when, evidence, add):
     text = str(when.get("duration_pattern", "")).lower()
     mentioned = [int(x) for x in re.findall(r"\b(\d+)\s+(?:persistent\s+)?events?\b", text)]
 
-    if expected is None:
-        add("Persistent event count", "PASS", "No persistent-event count is available to check.")
-    elif not mentioned:
-        add("Persistent event count", "WARN", "The explanation does not explicitly state the persistent-event count.")
+    if expected is None or not mentioned:
+        # The prompt deliberately asks the AI to avoid stating exact counts,
+        # so an absent count is expected, not a gap to flag.
+        add("Persistent event count", "PASS", "No exact persistent-event count was stated (expected -- the explanation is written in general terms).")
     else:
         bad = [x for x in mentioned if x != int(expected)]
         if bad:
