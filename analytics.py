@@ -84,78 +84,48 @@ def safe_load(loader, path, label):
 # ============================================================
 
 def aggregate_baseline_reference(baseline_df, metrics):
-    """Build a population-level healthy reference from the baseline parquet.
-
-    The baseline file contains per-group median/q10/q90 values. We aggregate
-    those groups with a median-of-medians approach so the reference is stable
-    and is explicitly treated as a population-level reference, not a
-    timestamp-matched operating-condition model.
-    """
+    """Median-of-medians reference values for each metric across all
+    healthy baseline groups — a population-level reference, not matched to
+    any single timestamp's operating conditions."""
     reference = {}
     if baseline_df is None or baseline_df.empty:
         return reference
-
-    group_count = int(len(baseline_df))
-    total_healthy_samples = None
-    if "healthy_sample_count" in baseline_df.columns:
-        sample_counts = pd.to_numeric(
-            baseline_df["healthy_sample_count"], errors="coerce"
-        ).dropna()
-        if not sample_counts.empty:
-            total_healthy_samples = int(sample_counts.sum())
-
     for metric in metrics:
-        median_col = f"{metric}_median"
-        q10_col = f"{metric}_q10"
-        q90_col = f"{metric}_q90"
+        median_col, q10_col, q90_col = f"{metric}_median", f"{metric}_q10", f"{metric}_q90"
         if median_col not in baseline_df.columns:
             continue
-
         med = pd.to_numeric(baseline_df[median_col], errors="coerce").dropna()
         if med.empty:
             continue
         q10 = pd.to_numeric(baseline_df.get(q10_col), errors="coerce").dropna()
         q90 = pd.to_numeric(baseline_df.get(q90_col), errors="coerce").dropna()
-
         reference[metric] = {
             "median": clean_value(med.median()),
             "typical_low_q10": clean_value(q10.median()) if not q10.empty else None,
             "typical_high_q90": clean_value(q90.median()) if not q90.empty else None,
-            "baseline_group_count": group_count,
-            "healthy_sample_count_total": total_healthy_samples,
         }
     return reference
 
 
 def compare_population_to_baseline(anomaly_df, baseline_reference):
-    """Compare anomaly-population statistics with the healthy reference.
-
-    This is evidence for the AI explanation. It describes statistical
-    differences only and does not establish a physical cause or fault.
-    """
+    """Compare mean anomaly-population values against the aggregated healthy
+    baseline reference. Supporting evidence only — does not establish cause."""
     rows = []
     if anomaly_df is None or anomaly_df.empty:
         return rows
-
     for metric, label, unit in COMPARISON_METRICS:
         if metric not in anomaly_df.columns or metric not in baseline_reference:
             continue
-
         values = pd.to_numeric(anomaly_df[metric], errors="coerce").dropna()
         if values.empty:
             continue
-
-        observed_mean = float(values.mean())
-        observed_median = float(values.median())
+        observed = values.mean()
         ref = baseline_reference[metric]
-        healthy_median = ref.get("median")
-        low = ref.get("typical_low_q10")
-        high = ref.get("typical_high_q90")
-
+        low, high = ref.get("typical_low_q10"), ref.get("typical_high_q90")
         if low is not None and high is not None:
-            if observed_mean < low:
+            if observed < low:
                 status = "Below typical range"
-            elif observed_mean > high:
+            elif observed > high:
                 status = "Above typical range"
             else:
                 status = "Within typical range"
@@ -163,25 +133,9 @@ def compare_population_to_baseline(anomaly_df, baseline_reference):
         else:
             status = "No healthy reference available"
             range_str = "—"
-
-        difference_from_median = None
-        difference_percent = None
-        if healthy_median is not None:
-            difference_from_median = observed_mean - healthy_median
-            if healthy_median != 0:
-                difference_percent = difference_from_median / abs(healthy_median) * 100.0
-
         rows.append({
-            "metric": metric,
             "label": label,
-            "unit": unit.strip(),
-            "observed_mean": clean_value(observed_mean),
-            "observed_median": clean_value(observed_median),
-            "healthy_median": clean_value(healthy_median),
-            "healthy_q10": clean_value(low),
-            "healthy_q90": clean_value(high),
-            "difference_from_healthy_median": clean_value(difference_from_median),
-            "difference_percent": clean_value(difference_percent),
+            "observed": f"{observed:.1f}{unit}",
             "typical_range": range_str,
             "status": status,
         })
@@ -316,21 +270,11 @@ def build_value_change_evidence(events_df):
         ends = pd.to_numeric(events_df[end_col], errors="coerce").dropna()
         if starts.empty or ends.empty:
             continue
-        typical_start = float(starts.mean())
-        typical_end = float(ends.mean())
-        change = typical_end - typical_start
-        change_percent = None
-        if typical_start != 0:
-            change_percent = change / abs(typical_start) * 100.0
-
         changes[col] = {
             "label": label,
             "unit": unit,
-            "event_count_with_start_end": int(min(len(starts), len(ends))),
-            "typical_start": clean_value(typical_start),
-            "typical_end": clean_value(typical_end),
-            "change": clean_value(change),
-            "change_percent": clean_value(change_percent),
+            "typical_start": clean_value(starts.mean()),
+            "typical_end": clean_value(ends.mean()),
         }
     return changes
 
@@ -399,13 +343,7 @@ def build_population_evidence(anomaly_df, events_df, baseline_df, start_date, en
     evidence["anomaly_observations"] = {"observation_count": int(len(anomaly_df)), "statistics": stats}
 
     baseline_reference = aggregate_baseline_reference(baseline_df, EVIDENCE_NUMERIC_COLUMNS)
-    evidence["healthy_baseline"] = {
-        "reference": baseline_reference,
-        "interpretation": (
-            "Population-level healthy reference derived from the baseline parquet. "
-            "It is not matched to a specific timestamp or operating condition."
-        ),
-    }
+    evidence["healthy_baseline"] = {"reference": baseline_reference}
     evidence["baseline_comparisons"] = compare_population_to_baseline(anomaly_df, baseline_reference)
 
     time_patterns = {}
