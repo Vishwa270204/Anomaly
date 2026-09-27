@@ -19,6 +19,7 @@ from analytics import (
     COMPARISON_METRICS,
     aggregate_baseline_reference,
     build_anomaly_events,
+    build_event_evidence,
     build_population_evidence,
     compare_population_to_baseline,
     load_dashboard_baseline,
@@ -26,6 +27,7 @@ from analytics import (
     safe_load,
 )
 from ai_engine import generate_overall_ai_explanation, validate_overall_explanation
+from data_validation import summarize, validate_event_data
 from components import render_ai_explanation
 from styles import DASHBOARD_CSS
 from utils import fmt_num
@@ -277,3 +279,35 @@ with tab_details:
 
         st.dataframe(table, width="stretch", hide_index=True)
         st.caption("Severity values reflect the anomaly score, not a probability of failure.")
+
+        # --------------------------------------------------------
+        # PER-EVENT DATA / EVIDENCE VALIDATION
+        # --------------------------------------------------------
+        st.markdown("### Validate an Event")
+        st.caption(
+            "Cross-checks this event's evidence against the underlying data "
+            "(pipeline/data integrity only — not a physical root-cause or AI-style check)."
+        )
+
+        selected_event_id = st.selectbox("Select an event to validate", events_df["event_id"].tolist())
+        event_row = events_df[events_df["event_id"] == selected_event_id].iloc[0]
+
+        event_evidence = build_event_evidence(event_row, filtered_df, baseline_reference)
+        validation_results = validate_event_data(event_evidence, filtered_df)
+        verdict = summarize(validation_results)
+
+        verdict_display = {
+            "PASS": ("success", "✅ PASS"),
+            "NEEDS_REVIEW": ("warning", "⚠️ NEEDS REVIEW"),
+            "FAIL": ("error", "❌ FAIL"),
+        }
+        banner_fn, verdict_label = verdict_display.get(verdict["verdict"], ("info", verdict["verdict"]))
+        getattr(st, banner_fn)(
+            f"**{verdict_label}** — {verdict['pass_count']} passed, "
+            f"{verdict['warn_count']} warning(s), {verdict['fail_count']} failed."
+        )
+
+        status_icon = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
+        for check in validation_results:
+            icon = status_icon.get(check["status"], "•")
+            st.markdown(f"{icon} **{check['rule']}** — {check['detail']}")
