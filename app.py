@@ -84,23 +84,13 @@ st.markdown(
 min_date, max_date = df["timestamp"].min().date(), df["timestamp"].max().date()
 show_inverter_filter = "inverter_id" in df.columns and df["inverter_id"].nunique() > 1
 
-with st.container(border=True):
-    cols = st.columns([1, 1, 2] if show_inverter_filter else [1, 3])
+show_anomalies_only = False
 
-    with cols[0]:
-        show_anomalies_only = st.checkbox("Show anomalies only", value=False)
-
-    if show_inverter_filter:
-        with cols[1]:
-            inverter_options = ["All"] + sorted(df["inverter_id"].dropna().unique().tolist())
-            selected_inverter = st.selectbox("Inverter", inverter_options)
-        caption_col = cols[2]
-    else:
-        selected_inverter = "All"
-        caption_col = cols[1]
-
-    with caption_col:
-        st.caption("**Severity**: higher = further outside normal range.")
+if show_inverter_filter:
+    inverter_options = ["All"] + sorted(df["inverter_id"].dropna().unique().tolist())
+    selected_inverter = st.selectbox("Inverter", inverter_options)
+else:
+    selected_inverter = "All"
 
 start_date, end_date = min_date, max_date
 
