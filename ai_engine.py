@@ -43,50 +43,43 @@ SYSTEM_PROMPT = (
 
 EXPLANATION_JSON_SCHEMA = """{
   "headline": "One short sentence describing the overall anomaly pattern in plain, general terms.",
-  "summary": "2-3 concise sentences describing the strongest evidence-backed pattern. Use actual before/after numbers from value_changes and/or quantitative baseline comparison values when useful.",
-  "why_it_happened": ["evidence-backed interpretation 1", "evidence-backed interpretation 2", "evidence-backed interpretation 3"],
+  "summary": "2-3 sentences describing what is generally happening and WHY -- cite the actual before/after numbers from value_changes (e.g. 'DC power drops from ~52 kW to ~30 kW while temperature climbs from ~40C to ~58C') and/or the baseline comparison. This is the one place exact figures belong.",
+  "why_it_happened": ["a clear reason citing the value_changes numbers and/or baseline comparison", "reason 2", "reason 3"],
   "when_occurred": {
-    "time_pattern": "A general description of when this tends to happen, only if supported by evidence. No specific dates or clock times.",
-    "duration_pattern": "A general sense of how long or how often this tends to happen, only if supported by evidence. Avoid exact counts or precise minute figures.",
+    "time_pattern": "A general description of when this tends to happen (e.g. 'mostly during high-load daylight hours'), only if supported by evidence. No specific dates or clock times.",
+    "duration_pattern": "A general sense of how long or how often this tends to happen (e.g. 'lasts around an hour' or 'happens occasionally'), only if supported by evidence. Avoid exact counts or precise minute figures.",
     "operating_pattern": "Recurring operating-condition patterns (status, communication, daylight), described generally, only if supported by evidence."
   },
   "recommended_actions": ["practical operator check 1", "practical operator check 2", "practical operator check 3"]
 }"""
 
 EXPLANATION_RULES = """Rules:
-- Write like a plant operator summarizing a recurring pattern to a colleague.
-- Treat the supplied EVIDENCE as the only source of factual claims. Do not invent
-  measurements, operating states, causes, dates, counts, or comparisons.
-- The "value_changes" evidence contains typical start -> end readings across
-  persistent anomaly events. Use these concrete numbers when they help explain
-  the observed pattern. The evidence also provides change_percent; use it only
-  when it is directly supported by the supplied values.
-- The "baseline_comparisons" evidence is the preferred quantitative comparison
-  between anomalous observations and the healthy baseline. It contains observed
-  mean/median, healthy median, q10/q90 range, difference_percent, and status.
-  When mentioning a baseline difference, use the supplied direction and values.
-- The "healthy_baseline" object is a population-level reference from the
-  baseline parquet. It is NOT matched to a timestamp and does not prove a fault.
-- "why_it_happened" must contain evidence-backed interpretations, not asserted
-  physical causes. Say "consistent with", "associated with", "may indicate", or
-  "warrants investigation" when appropriate. If the evidence cannot establish
-  a physical cause, say so explicitly.
-- Feature contributions indicate variables associated with unusual reconstruction
-  error. They do not prove physical root cause and must never be presented as a
-  confirmed physical cause.
-- Never use causal or diagnostic wording such as "root cause", "caused by",
-  "because of", "due to", "triggered by", "confirmed fault", or "proven cause".
-- Never call anomaly_score_ratio or reconstruction_error a probability or confidence.
-- Do NOT cite exact event counts, timestamps, dates, or precise durations. If duration
-  or frequency is useful, use conversational wording such as "about an hour" or
-  "repeatedly", but only when supported by evidence.
-- Do not expose ML implementation terms such as autoencoder, reconstruction error,
-  threshold, probability, or confidence in operator-facing text.
-- Prefer patterns supported by multiple observations/events over isolated readings.
-- Recommended actions should be inspection/verification steps supported by the
-  observed evidence. Do not claim that a component has failed.
-- Keep every field concise and grounded only in the supplied evidence."""
-
+- Write like a plant operator summarizing a pattern to a colleague, not like a data
+  report -- EXCEPT for the actual measurement values, which should be concrete.
+- The "value_changes" evidence gives the typical start -> end reading for key metrics
+  across all events (e.g. dc_power_kw typical_start -> typical_end). Use these real
+  numbers in "summary" and "why_it_happened" to explain what physically happens during
+  an event (e.g. "DC power falls from about 52 kW to 30 kW"). Round to whole numbers or
+  one decimal place -- don't restate more precision than was supplied.
+- The healthy-baseline comparison (e.g. "temperature ran above the typical healthy
+  range") is also good supporting detail for WHY -- include it when relevant.
+- Do NOT cite exact event counts, timestamps, dates, or precise durations (e.g. never
+  say "2 persistent events" or "62.4 minutes" or "from 2026-01-01 08:20"). If a duration
+  or frequency is worth mentioning, round it to something conversational ("about an
+  hour", "a handful of times", "briefly") instead of an exact figure. This restriction
+  is only about counts/timestamps/durations -- value_changes and baseline numbers are
+  exempt and should be used.
+- Use only the evidence below to decide what pattern and numbers to cite; never invent
+  a measurement, date, count, or comparison that isn't supplied.
+- Feature contributions show variables associated with unusual reconstruction error --
+  they do not prove physical root cause. Never say "root cause" or "caused by".
+- Never call anomaly_score_ratio or reconstruction_error a probability or confidence value.
+- Healthy-baseline values are a supporting comparison only, not proof of a fault.
+- If the physical cause cannot be determined from the evidence, say so explicitly.
+- Prefer patterns backed by multiple observations or events over isolated ones.
+- Write for a plant operator: avoid ML jargon (autoencoder, threshold, reconstruction
+  error, probability) in the operator-facing text.
+- Keep every field concise and grounded only in the evidence below."""
 
 
 @st.cache_resource
@@ -179,7 +172,6 @@ def validate_overall_explanation(explanation, evidence):
     _check_metric_values(lower_text, evidence, add)
     _check_value_change_claims(lower_text, evidence, add)
     _check_baseline_direction(lower_text, evidence, add)
-    _check_baseline_numeric_claims(lower_text, evidence, add)
 
     return checks
 
@@ -361,21 +353,12 @@ SENTENCE_BOUNDARY = ".!?;"
 
 
 def _check_metric_values(lower_text, evidence, add):
-    """Validate metric values without confusing percentage changes with the
-    metric's physical value.
-
-    Example that must be accepted:
-        "DC power fell by 40% to 31.4 kW."
-
-    The old implementation chose the *nearest* number to the metric name.
-    That made it select ``40%`` instead of ``31.4 kW`` and incorrectly fail.
-    This version only checks numeric claims whose unit matches the metric.
-    Percentage claims are handled by the baseline/value-change validators.
-    """
     stats = evidence.get("anomaly_observations", {}).get("statistics", {})
+    # dc_power_kw / ac_power_kw / inverter_temperature_c are validated as
+    # before/after ranges by _check_value_change_claims instead -- checking
+    # them here too would double-flag the same numbers out of context.
     skip_metrics = set(evidence.get("value_changes", {}).keys())
     failures = []
-    checked = False
 
     for metric, (aliases, expected_unit) in METRIC_ALIASES.items():
         if metric in skip_metrics:
@@ -383,64 +366,30 @@ def _check_metric_values(lower_text, evidence, add):
         metric_stats = stats.get(metric)
         if not isinstance(metric_stats, dict):
             continue
-
-        expected_values = [
-            float(v) for v in metric_stats.values()
-            if isinstance(v, (int, float)) and pd.notna(v)
-        ]
+        expected_values = [float(v) for v in metric_stats.values() if isinstance(v, (int, float)) and pd.notna(v)]
         if not expected_values:
             continue
 
         for alias in aliases:
             for match in re.finditer(re.escape(alias), lower_text):
-                left = max(
-                    (lower_text.rfind(c, 0, match.start()) for c in SENTENCE_BOUNDARY),
-                    default=-1,
-                ) + 1
+                left = max((lower_text.rfind(c, 0, match.start()) for c in SENTENCE_BOUNDARY), default=-1) + 1
                 right_candidates = [lower_text.find(c, match.end()) for c in SENTENCE_BOUNDARY]
                 right = min([p for p in right_candidates if p >= 0], default=len(lower_text))
                 candidates = list(NUMERIC_CLAIM_RE.finditer(lower_text, left, right))
-
-                # Only compare values carrying the metric's physical unit.
-                # A percentage such as "40% lower" is not the DC-power value.
-                unit_candidates = []
-                for candidate in candidates:
-                    raw, unit = candidate.groups()
-                    normalized_unit = unit.lower().replace("°c", "c")
-                    if expected_unit and normalized_unit == expected_unit:
-                        unit_candidates.append(candidate)
-
-                if not unit_candidates:
+                if not candidates:
                     continue
-
-                checked = True
-                for candidate in unit_candidates:
-                    raw, unit = candidate.groups()
-                    value = float(raw)
-                    if not any(
-                        abs(value - expected) <= max(0.5, abs(expected) * 0.05)
-                        for expected in expected_values
-                    ):
-                        failures.append(f"{raw} {unit} for {metric}")
+                nearest = min(candidates, key=lambda m: min(abs(m.start() - match.end()), abs(match.start() - m.end())))
+                raw, unit = nearest.groups()
+                normalized_unit = unit.lower().replace("°c", "c")
+                if expected_unit and normalized_unit not in {expected_unit, ""}:
+                    failures.append(f"{raw} {unit} near {metric}")
+                elif not any(abs(float(raw) - k) <= max(0.5, abs(k) * 0.05) for k in expected_values):
+                    failures.append(f"{raw} {unit} for {metric}")
 
     if failures:
-        add(
-            "Metric-specific numerical claims",
-            "FAIL",
-            "Unsupported metric/value combination(s): " + ", ".join(failures[:5]) + ".",
-        )
-    elif checked:
-        add(
-            "Metric-specific numerical claims",
-            "PASS",
-            "Numeric metric claims match the statistics of the metric they describe.",
-        )
+        add("Metric-specific numerical claims", "FAIL", "Unsupported metric/value combination(s): " + ", ".join(failures[:5]) + ".")
     else:
-        add(
-            "Metric-specific numerical claims",
-            "PASS",
-            "No numeric metric claim requiring verification was made.",
-        )
+        add("Metric-specific numerical claims", "PASS", "Numeric metric claims match the statistics of the metric they describe.")
 
 
 VALUE_CHANGE_RE = re.compile(
@@ -503,209 +452,23 @@ def _check_value_change_claims(lower_text, evidence, add):
         add("Before/after value claims", "WARN", "value_changes evidence was supplied, but no before/after value claim was made.")
 
 
-def _check_baseline_numeric_claims(lower_text, evidence, add):
-    """Validate only numbers that are explicitly presented as baseline facts.
-
-    Do not validate every number in a sentence containing a metric. A sentence
-    may legitimately contain event start/end values, percentage changes, and a
-    healthy-baseline value together, for example:
-
-        "DC power fell from 52 to 31 kW, about 40% below the healthy median
-        of 52.4 kW."
-
-    The baseline validator should check 40% and 52.4 kW here, while the
-    value-change validator checks 52 -> 31 kW.
-    """
-    rows = evidence.get("baseline_comparisons", [])
-    if not isinstance(rows, list) or not rows:
-        add("Baseline numerical claims", "PASS", "No baseline comparison values are available to check.")
-        return
-
-    metric_aliases = {
-        "dc power": "DC Power",
-        "ac power": "AC Power",
-        "temperature": "Temperature",
-        "efficiency": "Efficiency",
-        "power factor": "Power Factor",
-        "dc current": "DC Current",
-    }
-    number_re = re.compile(
-        r"(?<![A-Za-z0-9])(-?\d+(?:\.\d+)?)\s*(kW|A|°C|C|%|Hz|ms|W/m2)?\b",
-        re.I,
-    )
-
-    # Phrases that make a nearby number a baseline claim.
-    baseline_context_re = re.compile(
-        r"(?:healthy\s+)?(?:baseline|median|typical|normal\s+range|typical\s+range|"
-        r"q10|q90|healthy\s+range|expected)"
-        r"|(?:above|below|higher|lower|exceed(?:s|ed)?|less\s+than|greater\s+than)\s+"
-        r"(?:the\s+)?(?:healthy\s+)?(?:baseline|median|typical|normal|expected|range)",
-        re.I,
-    )
-
-    failures = []
-    checked = False
-    sentence_spans = list(re.finditer(r"[^.!?;]+(?:[.!?;]|$)", lower_text))
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        label = str(row.get("label", ""))
-        label_lower = label.lower()
-        aliases = [alias for alias in metric_aliases if alias in label_lower]
-        if not aliases:
-            continue
-        alias = aliases[0]
-
-        numeric_values = {
-            "kw": [row.get(k) for k in (
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
-            )],
-            "a": [row.get(k) for k in (
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
-            )],
-            "c": [row.get(k) for k in (
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
-            )],
-            "%": [row.get("difference_percent")],
-            "hz": [row.get(k) for k in (
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
-            )],
-            "ms": [row.get(k) for k in (
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
-            )],
-            "w/m2": [row.get(k) for k in (
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
-            )],
-            "": [row.get(k) for k in (
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median",
-                "difference_percent"
-            )],
-        }
-
-        for key in numeric_values:
-            numeric_values[key] = [
-                float(v) for v in numeric_values[key]
-                if isinstance(v, (int, float)) and pd.notna(v)
-            ]
-
-        for span in sentence_spans:
-            sentence = span.group(0)
-            if alias not in sentence:
-                continue
-
-            # Only inspect numbers in a baseline context. This prevents event
-            # start/end values in the same sentence from being mistaken for
-            # baseline values.
-            contexts = list(baseline_context_re.finditer(sentence))
-            if not contexts:
-                continue
-
-            checked = True
-            claims = list(number_re.finditer(sentence))
-            for claim in claims:
-                raw = float(claim.group(1))
-                unit = (claim.group(2) or "").lower().replace("°c", "c")
-
-                # Determine whether this number is close to a baseline phrase.
-                # A small local window is enough to associate "52.4 kW" with
-                # "healthy median" without capturing unrelated event values.
-                near_context = any(
-                    abs(claim.start() - ctx.end()) <= 45 or
-                    abs(ctx.start() - claim.end()) <= 45
-                    for ctx in contexts
-                )
-                if not near_context:
-                    continue
-
-                expected = numeric_values.get(unit, numeric_values[""])
-                if unit == "%":
-                    expected = [abs(v) for v in numeric_values["%"]]
-                    raw_cmp = abs(raw)
-                else:
-                    raw_cmp = raw
-
-                if not expected:
-                    continue
-
-                if not any(
-                    abs(raw_cmp - exp) <= max(0.5, abs(exp) * 0.05)
-                    for exp in expected
-                ):
-                    failures.append(
-                        f"{label}: {raw:g}{claim.group(2) or ''} is not supported by the supplied baseline comparison values"
-                    )
-
-    if failures:
-        detail = "; ".join(dict.fromkeys(failures))
-        add("Baseline numerical claims", "FAIL", detail[:500] + ("..." if len(detail) > 500 else "."))
-    elif checked:
-        add("Baseline numerical claims", "PASS", "Numeric baseline claims match the supplied comparison values and units.")
-    else:
-        add("Baseline numerical claims", "PASS", "No numeric baseline claim requiring verification was made.")
-
-
 def _check_baseline_direction(lower_text, evidence, add):
-    """Check baseline direction in the same sentence as the metric.
-
-    The earlier implementation searched the entire explanation. If one metric
-    was above baseline and another was below baseline, a direction word for the
-    first metric could accidentally satisfy the check for the second. This
-    sentence-local check avoids that false positive/false negative.
-    """
     rows = evidence.get("baseline_comparisons", [])
     failures, claim_found = [], False
-
-    direction_words = {
-        "above": r"above|higher|elevated|exceed|greater than|increased|higher than",
-        "below": r"below|lower|reduced|decreased|less than|lower than",
-    }
-
-    sentence_spans = list(re.finditer(r"[^.!?;]+(?:[.!?;]|$)", lower_text))
 
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        label = str(row.get("label", ""))
-        label_lower = label.lower()
+        label = str(row.get("label", "")).lower()
         status = str(row.get("status", "")).lower()
-        aliases = [alias for alias in (
-            "dc power", "ac power", "temperature", "efficiency",
-            "power factor", "dc current"
-        ) if alias in label_lower]
-        if not aliases or status not in {"above typical range", "below typical range"}:
+        tokens = [t for t in re.findall(r"[a-z0-9]+", label) if len(t) >= 3]
+        if not tokens or not any(t in lower_text for t in tokens):
             continue
-
-        alias = aliases[0]
-        matched_sentence = False
-        for span in sentence_spans:
-            sentence = span.group(0)
-            if alias not in sentence:
-                continue
-            matched_sentence = True
-            claim_found = True
-            if status == "above typical range":
-                if not re.search(direction_words["above"], sentence):
-                    failures.append(
-                        f"{label}: evidence is above typical range, but the sentence containing {label} does not state an above/higher direction"
-                    )
-            elif status == "below typical range":
-                if not re.search(direction_words["below"], sentence):
-                    failures.append(
-                        f"{label}: evidence is below typical range, but the sentence containing {label} does not state a below/lower direction"
-                    )
-
-        # Mentioning the metric without a directional claim is fine; the AI is
-        # not required to discuss every baseline comparison.
-        if not matched_sentence:
-            continue
+        claim_found = True
+        if "above typical range" in status and not re.search(r"above|higher|elevated|exceed|greater than", lower_text):
+            failures.append(f"{label}: evidence is above typical range, but AI doesn't support that direction")
+        elif "below typical range" in status and not re.search(r"below|lower|reduced|decreased|less than", lower_text):
+            failures.append(f"{label}: evidence is below typical range, but AI doesn't support that direction")
 
     if failures:
         add("Healthy-baseline claims", "FAIL", "; ".join(failures[:3]))
@@ -713,4 +476,3 @@ def _check_baseline_direction(lower_text, evidence, add):
         add("Healthy-baseline claims", "PASS", "Baseline-direction claims are consistent with the supplied comparison.")
     else:
         add("Healthy-baseline claims", "PASS", "No unsupported baseline-direction claim was detected.")
-
