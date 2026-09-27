@@ -40,15 +40,21 @@ def validate_event_data(evidence, df, trend_df=None, baseline_df=None):
         rows = df.iloc[0:0]
 
     # 2. Power change direction
-    direction_errors=[]
-    for col,label in [("dc_power_kw","DC"),("ac_power_kw","AC")]:
-        if col in rows.columns and len(rows)>=2:
-            a=pd.to_numeric(rows[col],errors="coerce").dropna()
-            if len(a)>=2:
-                if a.iloc[-1] < a.iloc[0]: direction_errors.append(f"{label} power decreased")
-                elif a.iloc[-1] > a.iloc[0]: direction_errors.append(f"{label} power increased")
-    results.append({"rule":"Power change direction","status":"PASS",
-                    "detail":("; ".join(direction_errors)+" in the event data.") if direction_errors else "No power direction could be recomputed."})
+    direction_changes = []
+    for col, label in [("dc_power_kw", "DC"), ("ac_power_kw", "AC")]:
+        if col in rows.columns and len(rows) >= 2:
+            a = pd.to_numeric(rows[col], errors="coerce").dropna()
+            if len(a) >= 2:
+                if a.iloc[-1] < a.iloc[0]:
+                    direction_changes.append(f"{label} power decreased ({a.iloc[0]:.2f} → {a.iloc[-1]:.2f} kW)")
+                elif a.iloc[-1] > a.iloc[0]:
+                    direction_changes.append(f"{label} power increased ({a.iloc[0]:.2f} → {a.iloc[-1]:.2f} kW)")
+    results.append({
+        "rule": "Power change direction",
+        "status": "PASS" if direction_changes else "WARN",
+        "detail": ("Yes — " + "; ".join(direction_changes) + " during this event.") if direction_changes
+                  else "No — power direction could not be confirmed from the event data.",
+    })
 
     # 3. Numerical evidence integrity: verify the core statistics sent to the LLM.
     stat_mismatches=[]
