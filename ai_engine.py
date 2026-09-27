@@ -43,43 +43,50 @@ SYSTEM_PROMPT = (
 
 EXPLANATION_JSON_SCHEMA = """{
   "headline": "One short sentence describing the overall anomaly pattern in plain, general terms.",
-  "summary": "2-3 sentences describing what is generally happening and WHY -- cite the actual before/after numbers from value_changes (e.g. 'DC power drops from ~52 kW to ~30 kW while temperature climbs from ~40C to ~58C') and/or the baseline comparison. This is the one place exact figures belong.",
-  "why_it_happened": ["a clear reason citing the value_changes numbers and/or baseline comparison", "reason 2", "reason 3"],
+  "summary": "2-3 concise sentences describing the strongest evidence-backed pattern. Use actual before/after numbers from value_changes and/or quantitative baseline comparison values when useful.",
+  "why_it_happened": ["evidence-backed interpretation 1", "evidence-backed interpretation 2", "evidence-backed interpretation 3"],
   "when_occurred": {
-    "time_pattern": "A general description of when this tends to happen (e.g. 'mostly during high-load daylight hours'), only if supported by evidence. No specific dates or clock times.",
-    "duration_pattern": "A general sense of how long or how often this tends to happen (e.g. 'lasts around an hour' or 'happens occasionally'), only if supported by evidence. Avoid exact counts or precise minute figures.",
+    "time_pattern": "A general description of when this tends to happen, only if supported by evidence. No specific dates or clock times.",
+    "duration_pattern": "A general sense of how long or how often this tends to happen, only if supported by evidence. Avoid exact counts or precise minute figures.",
     "operating_pattern": "Recurring operating-condition patterns (status, communication, daylight), described generally, only if supported by evidence."
   },
   "recommended_actions": ["practical operator check 1", "practical operator check 2", "practical operator check 3"]
 }"""
 
 EXPLANATION_RULES = """Rules:
-- Write like a plant operator summarizing a pattern to a colleague, not like a data
-  report -- EXCEPT for the actual measurement values, which should be concrete.
-- The "value_changes" evidence gives the typical start -> end reading for key metrics
-  across all events (e.g. dc_power_kw typical_start -> typical_end). Use these real
-  numbers in "summary" and "why_it_happened" to explain what physically happens during
-  an event (e.g. "DC power falls from about 52 kW to 30 kW"). Round to whole numbers or
-  one decimal place -- don't restate more precision than was supplied.
-- The healthy-baseline comparison (e.g. "temperature ran above the typical healthy
-  range") is also good supporting detail for WHY -- include it when relevant.
-- Do NOT cite exact event counts, timestamps, dates, or precise durations (e.g. never
-  say "2 persistent events" or "62.4 minutes" or "from 2026-01-01 08:20"). If a duration
-  or frequency is worth mentioning, round it to something conversational ("about an
-  hour", "a handful of times", "briefly") instead of an exact figure. This restriction
-  is only about counts/timestamps/durations -- value_changes and baseline numbers are
-  exempt and should be used.
-- Use only the evidence below to decide what pattern and numbers to cite; never invent
-  a measurement, date, count, or comparison that isn't supplied.
-- Feature contributions show variables associated with unusual reconstruction error --
-  they do not prove physical root cause. Never say "root cause" or "caused by".
-- Never call anomaly_score_ratio or reconstruction_error a probability or confidence value.
-- Healthy-baseline values are a supporting comparison only, not proof of a fault.
-- If the physical cause cannot be determined from the evidence, say so explicitly.
-- Prefer patterns backed by multiple observations or events over isolated ones.
-- Write for a plant operator: avoid ML jargon (autoencoder, threshold, reconstruction
-  error, probability) in the operator-facing text.
-- Keep every field concise and grounded only in the evidence below."""
+- Write like a plant operator summarizing a recurring pattern to a colleague.
+- Treat the supplied EVIDENCE as the only source of factual claims. Do not invent
+  measurements, operating states, causes, dates, counts, or comparisons.
+- The "value_changes" evidence contains typical start -> end readings across
+  persistent anomaly events. Use these concrete numbers when they help explain
+  the observed pattern. The evidence also provides change_percent; use it only
+  when it is directly supported by the supplied values.
+- The "baseline_comparisons" evidence is the preferred quantitative comparison
+  between anomalous observations and the healthy baseline. It contains observed
+  mean/median, healthy median, q10/q90 range, difference_percent, and status.
+  When mentioning a baseline difference, use the supplied direction and values.
+- The "healthy_baseline" object is a population-level reference from the
+  baseline parquet. It is NOT matched to a timestamp and does not prove a fault.
+- "why_it_happened" must contain evidence-backed interpretations, not asserted
+  physical causes. Say "consistent with", "associated with", "may indicate", or
+  "warrants investigation" when appropriate. If the evidence cannot establish
+  a physical cause, say so explicitly.
+- Feature contributions indicate variables associated with unusual reconstruction
+  error. They do not prove physical root cause and must never be presented as a
+  confirmed physical cause.
+- Never use causal or diagnostic wording such as "root cause", "caused by",
+  "because of", "due to", "triggered by", "confirmed fault", or "proven cause".
+- Never call anomaly_score_ratio or reconstruction_error a probability or confidence.
+- Do NOT cite exact event counts, timestamps, dates, or precise durations. If duration
+  or frequency is useful, use conversational wording such as "about an hour" or
+  "repeatedly", but only when supported by evidence.
+- Do not expose ML implementation terms such as autoencoder, reconstruction error,
+  threshold, probability, or confidence in operator-facing text.
+- Prefer patterns supported by multiple observations/events over isolated readings.
+- Recommended actions should be inspection/verification steps supported by the
+  observed evidence. Do not claim that a component has failed.
+- Keep every field concise and grounded only in the supplied evidence."""
+
 
 
 @st.cache_resource
@@ -172,6 +179,7 @@ def validate_overall_explanation(explanation, evidence):
     _check_metric_values(lower_text, evidence, add)
     _check_value_change_claims(lower_text, evidence, add)
     _check_baseline_direction(lower_text, evidence, add)
+    _check_baseline_numeric_claims(lower_text, evidence, add)
 
     return checks
 
@@ -451,6 +459,81 @@ def _check_value_change_claims(lower_text, evidence, add):
     else:
         add("Before/after value claims", "WARN", "value_changes evidence was supplied, but no before/after value claim was made.")
 
+
+def _check_baseline_numeric_claims(lower_text, evidence, add):
+    """Check common numeric claims against baseline comparison evidence.
+
+    This intentionally checks only the quantitative baseline values that the
+    prompt encourages the model to cite. It does not require the model to
+    mention numbers, and it does not infer causality from them.
+    """
+    rows = evidence.get("baseline_comparisons", [])
+    if not isinstance(rows, list) or not rows:
+        add("Baseline numerical claims", "PASS", "No baseline comparison values are available to check.")
+        return
+
+    metric_aliases = {
+        "dc power": "DC Power",
+        "ac power": "AC Power",
+        "temperature": "Temperature",
+        "efficiency": "Efficiency",
+        "power factor": "Power Factor",
+        "dc current": "DC Current",
+    }
+    unit_re = r"(?:kW|kw|A|a|°C|C|%|Hz|hz|ms|W/m2|w/m2)?"
+    number_re = re.compile(rf"(-?\d+(?:\.\d+)?)\s*{unit_re}\b")
+    failures = []
+    checked = False
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label", ""))
+        label_lower = label.lower()
+        aliases = [alias for alias in metric_aliases if alias in label_lower]
+        if not aliases:
+            continue
+        alias = aliases[0]
+        positions = [m.start() for m in re.finditer(re.escape(alias), lower_text)]
+        if not positions:
+            continue
+
+        expected = []
+        for key in (
+            "observed_mean", "observed_median", "healthy_median",
+            "healthy_q10", "healthy_q90", "difference_from_healthy_median",
+            "difference_percent",
+        ):
+            value = row.get(key)
+            if isinstance(value, (int, float)) and pd.notna(value):
+                expected.append(float(value))
+
+        if not expected:
+            continue
+
+        checked = True
+        for pos in positions:
+            left = max((lower_text.rfind(c, 0, pos) for c in SENTENCE_BOUNDARY), default=-1) + 1
+            right_candidates = [lower_text.find(c, pos) for c in SENTENCE_BOUNDARY]
+            right = min([p for p in right_candidates if p >= 0], default=len(lower_text))
+            sentence = lower_text[left:right]
+            claims = [float(m.group(1)) for m in number_re.finditer(sentence)]
+            if not claims:
+                continue
+
+            # Baseline comparison values may be expressed with different units
+            # in one sentence. We only fail when a claimed number is clearly
+            # incompatible with every supplied numeric value for that metric.
+            for claim in claims:
+                if not any(abs(claim - exp) <= max(0.5, abs(exp) * 0.05) for exp in expected):
+                    failures.append(f"{label}: {claim:g} is not supported by the supplied baseline comparison values")
+
+    if failures:
+        add("Baseline numerical claims", "FAIL", "; ".join(dict.fromkeys(failures))[:500] + ("..." if len("; ".join(failures)) > 500 else "."))
+    elif checked:
+        add("Baseline numerical claims", "PASS", "Numeric baseline claims match the supplied comparison values.")
+    else:
+        add("Baseline numerical claims", "PASS", "No numeric baseline claim requiring verification was made.")
 
 def _check_baseline_direction(lower_text, evidence, add):
     rows = evidence.get("baseline_comparisons", [])
