@@ -8,15 +8,16 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, BlinkMacSystem
 html { font-size: 16px; }
 
 :root {
-    --primary: #0F3554;
-    --primary-dark: #0B2740;
-    --warn: #DC6803;
-    --danger: #E4463F;
-    --border: #E4E9F0;
-    --muted: #64748B;
+    --primary: #0D9488;
+    --primary-dark: #0F766E;
+    --accent: #16A34A;
+    --warn: #B45309;
+    --danger: #DC2626;
+    --border: #D9EAE6;
+    --muted: #5B6B67;
     --surface: #FFFFFF;
-    --bg: #F5F7FA;
-    --ink: #0F172A;
+    --bg: #F1F8F6;
+    --ink: #0F2A24;
 }
 
 .stApp { background-color: var(--bg); }
@@ -98,23 +99,23 @@ label, .stSelectbox label, .stDateInput label {
 
 /* ---------- Header banner ---------- */
 .app-header {
-    background: linear-gradient(135deg, #0F3554 0%, #164A73 100%);
+    background: linear-gradient(135deg, #0F766E 0%, #16A34A 100%);
     padding: 1.05rem 1.3rem; border-radius: 12px; margin-bottom: 0.9rem;
     display: flex; align-items: center; gap: 0.85rem;
-    box-shadow: 0 4px 14px rgba(15, 53, 84, 0.18);
+    box-shadow: 0 4px 14px rgba(13, 148, 136, 0.22);
 }
 .app-header-icon {
-    background: rgba(255,255,255,0.14); color: #FFFFFF; width: 46px; height: 46px;
+    background: rgba(255,255,255,0.16); color: #FFFFFF; width: 46px; height: 46px;
     border-radius: 11px; display: flex; align-items: center; justify-content: center;
     font-size: 1.45rem; flex-shrink: 0;
 }
 .app-header-title { color: #FFFFFF; font-size: 1.65rem; font-weight: 700; line-height: 1.2; }
-.app-header-subtitle { color: #D6E4F5; font-size: 0.92rem; margin-top: 0.16rem; line-height: 1.35; }
+.app-header-subtitle { color: #DFF5EE; font-size: 0.92rem; margin-top: 0.16rem; line-height: 1.35; }
 
 /* ---------- AI Explanation card ---------- */
 .ai-title { color: var(--ink); font-size: 1.8rem; font-weight: 700; line-height: 1.3; margin-top: 0.25rem; margin-bottom: 0.15rem; }
 .ai-card {
-    width: 100%; box-sizing: border-box; background: #FFFFFF; border: 1px solid #D9E1EA;
+    width: 100%; box-sizing: border-box; background: #FFFFFF; border: 1px solid var(--border);
     border-radius: 12px; padding: 1.35rem 1.5rem; box-shadow: 0 2px 7px rgba(15, 23, 42, 0.05);
 }
 .ai-row { padding: 0.15rem 0 0.9rem 0; }
@@ -140,14 +141,14 @@ label, .stSelectbox label, .stDateInput label {
 .ai-bullets li { color: #1E293B; font-size: 0.96rem; line-height: 1.55; margin-bottom: 0.3rem; }
 
 .ai-footer-note {
-    display: flex; gap: 0.6rem; background: #F0F6FF; border: 1px solid #D6E4FA;
+    display: flex; gap: 0.6rem; background: #ECFBF6; border: 1px solid #BFE9DD;
     border-radius: 10px; padding: 0.75rem 0.9rem; margin-top: 1.1rem;
-    font-size: 0.85rem; color: #375273; line-height: 1.5;
+    font-size: 0.85rem; color: #0F5C50; line-height: 1.5;
 }
 
 /* ---------- Event / validation cards ---------- */
 .event-summary-card {
-    background: #FFFFFF; border: 1px solid #D9E1EA; border-radius: 12px;
+    background: #FFFFFF; border: 1px solid var(--border); border-radius: 12px;
     padding: 1rem 1.1rem; box-shadow: 0 1px 4px rgba(15,23,42,0.04); margin-bottom: 0.7rem;
 }
 .event-summary-title { color: var(--ink); font-size: 1.15rem; font-weight: 700; margin-bottom: 0.7rem; }
@@ -157,7 +158,7 @@ label, .stSelectbox label, .stDateInput label {
     font-size: 0.78rem; font-weight: 600; margin-left: 0.35rem;
 }
 .validation-card {
-    background: #FFFFFF; border: 1px solid #D9E1EA; border-radius: 12px;
+    background: #FFFFFF; border: 1px solid var(--border); border-radius: 12px;
     padding: 1rem 1.1rem; margin-top: 0.75rem; box-shadow: 0 1px 4px rgba(15,23,42,0.04);
 }
 .validation-header { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
