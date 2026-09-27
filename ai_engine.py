@@ -361,12 +361,21 @@ SENTENCE_BOUNDARY = ".!?;"
 
 
 def _check_metric_values(lower_text, evidence, add):
+    """Validate metric values without confusing percentage changes with the
+    metric's physical value.
+
+    Example that must be accepted:
+        "DC power fell by 40% to 31.4 kW."
+
+    The old implementation chose the *nearest* number to the metric name.
+    That made it select ``40%`` instead of ``31.4 kW`` and incorrectly fail.
+    This version only checks numeric claims whose unit matches the metric.
+    Percentage claims are handled by the baseline/value-change validators.
+    """
     stats = evidence.get("anomaly_observations", {}).get("statistics", {})
-    # dc_power_kw / ac_power_kw / inverter_temperature_c are validated as
-    # before/after ranges by _check_value_change_claims instead -- checking
-    # them here too would double-flag the same numbers out of context.
     skip_metrics = set(evidence.get("value_changes", {}).keys())
     failures = []
+    checked = False
 
     for metric, (aliases, expected_unit) in METRIC_ALIASES.items():
         if metric in skip_metrics:
@@ -374,30 +383,64 @@ def _check_metric_values(lower_text, evidence, add):
         metric_stats = stats.get(metric)
         if not isinstance(metric_stats, dict):
             continue
-        expected_values = [float(v) for v in metric_stats.values() if isinstance(v, (int, float)) and pd.notna(v)]
+
+        expected_values = [
+            float(v) for v in metric_stats.values()
+            if isinstance(v, (int, float)) and pd.notna(v)
+        ]
         if not expected_values:
             continue
 
         for alias in aliases:
             for match in re.finditer(re.escape(alias), lower_text):
-                left = max((lower_text.rfind(c, 0, match.start()) for c in SENTENCE_BOUNDARY), default=-1) + 1
+                left = max(
+                    (lower_text.rfind(c, 0, match.start()) for c in SENTENCE_BOUNDARY),
+                    default=-1,
+                ) + 1
                 right_candidates = [lower_text.find(c, match.end()) for c in SENTENCE_BOUNDARY]
                 right = min([p for p in right_candidates if p >= 0], default=len(lower_text))
                 candidates = list(NUMERIC_CLAIM_RE.finditer(lower_text, left, right))
-                if not candidates:
+
+                # Only compare values carrying the metric's physical unit.
+                # A percentage such as "40% lower" is not the DC-power value.
+                unit_candidates = []
+                for candidate in candidates:
+                    raw, unit = candidate.groups()
+                    normalized_unit = unit.lower().replace("°c", "c")
+                    if expected_unit and normalized_unit == expected_unit:
+                        unit_candidates.append(candidate)
+
+                if not unit_candidates:
                     continue
-                nearest = min(candidates, key=lambda m: min(abs(m.start() - match.end()), abs(match.start() - m.end())))
-                raw, unit = nearest.groups()
-                normalized_unit = unit.lower().replace("°c", "c")
-                if expected_unit and normalized_unit not in {expected_unit, ""}:
-                    failures.append(f"{raw} {unit} near {metric}")
-                elif not any(abs(float(raw) - k) <= max(0.5, abs(k) * 0.05) for k in expected_values):
-                    failures.append(f"{raw} {unit} for {metric}")
+
+                checked = True
+                for candidate in unit_candidates:
+                    raw, unit = candidate.groups()
+                    value = float(raw)
+                    if not any(
+                        abs(value - expected) <= max(0.5, abs(expected) * 0.05)
+                        for expected in expected_values
+                    ):
+                        failures.append(f"{raw} {unit} for {metric}")
 
     if failures:
-        add("Metric-specific numerical claims", "FAIL", "Unsupported metric/value combination(s): " + ", ".join(failures[:5]) + ".")
+        add(
+            "Metric-specific numerical claims",
+            "FAIL",
+            "Unsupported metric/value combination(s): " + ", ".join(failures[:5]) + ".",
+        )
+    elif checked:
+        add(
+            "Metric-specific numerical claims",
+            "PASS",
+            "Numeric metric claims match the statistics of the metric they describe.",
+        )
     else:
-        add("Metric-specific numerical claims", "PASS", "Numeric metric claims match the statistics of the metric they describe.")
+        add(
+            "Metric-specific numerical claims",
+            "PASS",
+            "No numeric metric claim requiring verification was made.",
+        )
 
 
 VALUE_CHANGE_RE = re.compile(
@@ -461,14 +504,17 @@ def _check_value_change_claims(lower_text, evidence, add):
 
 
 def _check_baseline_numeric_claims(lower_text, evidence, add):
-    """Validate baseline numbers without confusing units or percentage direction.
+    """Validate only numbers that are explicitly presented as baseline facts.
 
-    The previous validator treated every number in a sentence as if it were the
-    same kind of quantity. That can falsely reject perfectly valid text such as
-    "31.4 kW, about 40% below the healthy median": 31.4 is a power value while
-    40 is a percentage. This version matches claims to the metric and unit and
-    treats percentage differences by magnitude, while checking directional words
-    separately in _check_baseline_direction().
+    Do not validate every number in a sentence containing a metric. A sentence
+    may legitimately contain event start/end values, percentage changes, and a
+    healthy-baseline value together, for example:
+
+        "DC power fell from 52 to 31 kW, about 40% below the healthy median
+        of 52.4 kW."
+
+    The baseline validator should check 40% and 52.4 kW here, while the
+    value-change validator checks 52 -> 31 kW.
     """
     rows = evidence.get("baseline_comparisons", [])
     if not isinstance(rows, list) or not rows:
@@ -483,40 +529,22 @@ def _check_baseline_numeric_claims(lower_text, evidence, add):
         "power factor": "Power Factor",
         "dc current": "DC Current",
     }
-    # Capture the unit so 40% is not compared against 40 kW, 40 A, etc.
     number_re = re.compile(
         r"(?<![A-Za-z0-9])(-?\d+(?:\.\d+)?)\s*(kW|A|°C|C|%|Hz|ms|W/m2)?\b",
         re.I,
     )
 
-    def expected_for_unit(row, unit):
-        unit = (unit or "").lower().replace("°c", "c")
-        if unit == "%":
-            keys = ["difference_percent"]
-        elif unit in {"kw", "a", "c", "hz", "ms", "w/m2"}:
-            keys = [
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median",
-            ]
-        else:
-            # An unqualified number is allowed only when it is close to one of
-            # the metric's supplied values. This preserves compatibility with
-            # concise AI wording while avoiding cross-unit percentage matches.
-            keys = [
-                "observed_mean", "observed_median", "healthy_median",
-                "healthy_q10", "healthy_q90", "difference_from_healthy_median",
-                "difference_percent",
-            ]
-        return [
-            float(row[k]) for k in keys
-            if isinstance(row.get(k), (int, float)) and pd.notna(row.get(k))
-        ]
+    # Phrases that make a nearby number a baseline claim.
+    baseline_context_re = re.compile(
+        r"(?:healthy\s+)?(?:baseline|median|typical|normal\s+range|typical\s+range|"
+        r"q10|q90|healthy\s+range|expected)"
+        r"|(?:above|below|higher|lower|exceed(?:s|ed)?|less\s+than|greater\s+than)\s+"
+        r"(?:the\s+)?(?:healthy\s+)?(?:baseline|median|typical|normal|expected|range)",
+        re.I,
+    )
 
     failures = []
     checked = False
-
-    # Split into sentences so numbers belonging to another metric elsewhere in
-    # the explanation cannot be attributed to this metric.
     sentence_spans = list(re.finditer(r"[^.!?;]+(?:[.!?;]|$)", lower_text))
 
     for row in rows:
@@ -527,15 +555,57 @@ def _check_baseline_numeric_claims(lower_text, evidence, add):
         aliases = [alias for alias in metric_aliases if alias in label_lower]
         if not aliases:
             continue
-
         alias = aliases[0]
-        expected_by_unit = {}
-        for unit in ("kw", "a", "c", "%", "hz", "ms", "w/m2", ""):
-            expected_by_unit[unit] = expected_for_unit(row, unit)
+
+        numeric_values = {
+            "kw": [row.get(k) for k in (
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
+            )],
+            "a": [row.get(k) for k in (
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
+            )],
+            "c": [row.get(k) for k in (
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
+            )],
+            "%": [row.get("difference_percent")],
+            "hz": [row.get(k) for k in (
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
+            )],
+            "ms": [row.get(k) for k in (
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
+            )],
+            "w/m2": [row.get(k) for k in (
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median"
+            )],
+            "": [row.get(k) for k in (
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median",
+                "difference_percent"
+            )],
+        }
+
+        for key in numeric_values:
+            numeric_values[key] = [
+                float(v) for v in numeric_values[key]
+                if isinstance(v, (int, float)) and pd.notna(v)
+            ]
 
         for span in sentence_spans:
             sentence = span.group(0)
             if alias not in sentence:
+                continue
+
+            # Only inspect numbers in a baseline context. This prevents event
+            # start/end values in the same sentence from being mistaken for
+            # baseline values.
+            contexts = list(baseline_context_re.finditer(sentence))
+            if not contexts:
                 continue
 
             checked = True
@@ -543,20 +613,32 @@ def _check_baseline_numeric_claims(lower_text, evidence, add):
             for claim in claims:
                 raw = float(claim.group(1))
                 unit = (claim.group(2) or "").lower().replace("°c", "c")
-                expected = expected_by_unit.get(unit, expected_by_unit[""])
-                if not expected:
+
+                # Determine whether this number is close to a baseline phrase.
+                # A small local window is enough to associate "52.4 kW" with
+                # "healthy median" without capturing unrelated event values.
+                near_context = any(
+                    abs(claim.start() - ctx.end()) <= 45 or
+                    abs(ctx.start() - claim.end()) <= 45
+                    for ctx in contexts
+                )
+                if not near_context:
                     continue
 
-                # Percent differences are commonly written as positive magnitude
-                # with directional language: "40% lower". Compare magnitude.
-                candidates = expected
+                expected = numeric_values.get(unit, numeric_values[""])
                 if unit == "%":
-                    candidates = [abs(v) for v in candidates]
+                    expected = [abs(v) for v in numeric_values["%"]]
                     raw_cmp = abs(raw)
                 else:
                     raw_cmp = raw
 
-                if not any(abs(raw_cmp - exp) <= max(0.5, abs(exp) * 0.05) for exp in candidates):
+                if not expected:
+                    continue
+
+                if not any(
+                    abs(raw_cmp - exp) <= max(0.5, abs(exp) * 0.05)
+                    for exp in expected
+                ):
                     failures.append(
                         f"{label}: {raw:g}{claim.group(2) or ''} is not supported by the supplied baseline comparison values"
                     )
