@@ -19,8 +19,6 @@ from analytics import (
     COMPARISON_METRICS,
     aggregate_baseline_reference,
     build_anomaly_events,
-    build_event_evidence,
-    build_key_observations,
     build_population_evidence,
     compare_population_to_baseline,
     load_dashboard_baseline,
@@ -28,8 +26,7 @@ from analytics import (
     safe_load,
 )
 from ai_engine import generate_overall_ai_explanation, validate_overall_explanation
-from data_quality import verify_event
-from components import render_ai_explanation, render_event_validation, render_evidence_consistency, render_key_observations
+from components import render_ai_explanation
 from styles import DASHBOARD_CSS
 from utils import fmt_num
 
@@ -86,39 +83,30 @@ min_date, max_date = df["timestamp"].min().date(), df["timestamp"].max().date()
 show_inverter_filter = "inverter_id" in df.columns and df["inverter_id"].nunique() > 1
 
 with st.container(border=True):
-    cols = st.columns([1.2, 1.2, 1, 1, 2] if show_inverter_filter else [1.2, 1.2, 1, 2])
+    cols = st.columns([1, 1, 2] if show_inverter_filter else [1, 3])
 
     with cols[0]:
-        start_date = st.date_input("Start date", value=min_date, min_value=min_date, max_value=max_date)
-    with cols[1]:
-        end_date = st.date_input("End date", value=max_date, min_value=min_date, max_value=max_date)
-    with cols[2]:
-        st.write("")
         show_anomalies_only = st.checkbox("Show anomalies only", value=False)
 
     if show_inverter_filter:
-        with cols[3]:
+        with cols[1]:
             inverter_options = ["All"] + sorted(df["inverter_id"].dropna().unique().tolist())
             selected_inverter = st.selectbox("Inverter", inverter_options)
-        caption_col = cols[4]
+        caption_col = cols[2]
     else:
         selected_inverter = "All"
-        caption_col = cols[3]
+        caption_col = cols[1]
 
     with caption_col:
         st.caption("**Severity**: higher = further outside normal range.")
 
-    if start_date > end_date:
-        st.warning("Start date is after end date — swap them to see results.")
+start_date, end_date = min_date, max_date
 
 # ============================================================
 # APPLY FILTERS
 # ============================================================
 
-if start_date <= end_date:
-    filtered_df = df[(df["timestamp"].dt.date >= start_date) & (df["timestamp"].dt.date <= end_date)].copy()
-else:
-    filtered_df = df.iloc[0:0].copy()
+filtered_df = df.copy()
 
 if selected_inverter != "All" and "inverter_id" in filtered_df.columns:
     filtered_df = filtered_df[filtered_df["inverter_id"] == selected_inverter].copy()
@@ -138,7 +126,6 @@ events_df = build_anomaly_events(anomaly_df)
 comparison_metric_names = [m for m, _, _ in COMPARISON_METRICS]
 baseline_reference = aggregate_baseline_reference(baseline_df, comparison_metric_names)
 comparison_rows = compare_population_to_baseline(anomaly_df, baseline_reference)
-key_obs = build_key_observations(anomaly_df, events_df, comparison_rows)
 
 # ============================================================
 # TABS  (AI generation first, everything else second)
@@ -185,11 +172,10 @@ with tab_ai:
         elif cached.get("explanation"):
             checks = cached.get("checks") or []
             has_fail = any(c.get("status") == "FAIL" for c in checks)
-            render_evidence_consistency(checks)
             if has_fail:
                 st.error(
                     "The AI explanation was withheld because one or more claims contradict "
-                    "the supplied evidence. Regenerate after reviewing the checks above."
+                    "the supplied evidence. Try regenerating."
                 )
             else:
                 render_ai_explanation(cached["explanation"])
@@ -247,10 +233,6 @@ with tab_details:
     else:
         st.info("No anomaly score data available for the selected period.")
 
-    st.markdown("### Key Observations")
-    st.caption("What to investigate first, based only on the evidence above.")
-    render_key_observations(key_obs)
-
     st.markdown("### Anomalies vs Healthy Baseline")
     st.caption(
         "Average values observed during anomalies compared with the typical healthy "
@@ -292,26 +274,3 @@ with tab_details:
 
         st.dataframe(table, width="stretch", hide_index=True)
         st.caption("Severity values reflect the anomaly score, not a probability of failure.")
-
-        st.markdown("### Verify an Event's Evidence")
-        st.caption("Independently re-checks one event's timing, direction, and numbers against the source data.")
-
-        selected_label = st.selectbox("Choose an event", events_df["event_id"].tolist())
-        selected_event = events_df[events_df["event_id"] == selected_label].iloc[0].to_dict()
-
-        st.markdown(
-            f'<div class="event-summary-card">'
-            f'<div class="event-summary-title">{selected_label}'
-            f'<span class="event-badge">{fmt_num(selected_event.get("duration_min"), 0, " min")}</span></div>'
-            f'{selected_event["start_time"]:%Y-%m-%d %H:%M} → {selected_event["end_time"]:%Y-%m-%d %H:%M} · '
-            f'{int(selected_event.get("anomaly_count", 0)):,} anomalous readings'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-        if st.button("Verify this event", type="primary"):
-            evidence = build_event_evidence(selected_event, filtered_df, baseline_reference)
-            results, summary = verify_event(evidence, filtered_df)
-            st.markdown('<div class="validation-card">', unsafe_allow_html=True)
-            render_event_validation(results, summary)
-            st.markdown("</div>", unsafe_allow_html=True)
