@@ -5,15 +5,12 @@ Production frontend only. All ML/training happens in inverter_anomaly.ipynb.
 
 Reads:
     dashboard_data.parquet      -> evaluation-period observations + model output
-    trend_data.parquet          -> optional extended raw history
     dashboard_baseline.parquet  -> healthy operating baseline (quantiles)
 
 Does NOT retrain or re-run the notebook. Does NOT treat anomaly_score_ratio
 as a probability. Feature contributions are reported as "contributed most
 to reconstruction error," never as a proven cause.
 """
-from datetime import timedelta
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -26,10 +23,8 @@ from analytics import (
     build_key_observations,
     build_population_evidence,
     compare_population_to_baseline,
-    get_healthy_baseline_summary,
     load_dashboard_baseline,
     load_dashboard_data,
-    load_trend_data,
     safe_load,
 )
 from ai_engine import generate_overall_ai_explanation, validate_overall_explanation
@@ -66,15 +61,6 @@ if df.empty:
     st.error("`dashboard_data.parquet` loaded but contains no rows.")
     st.stop()
 
-# trend_data.parquet is optional: it adds pre-evaluation history. If it
-# hasn't been generated yet, fall back to the evaluation data alone.
-try:
-    trend_df = load_trend_data("trend_data.parquet")
-    has_trend_data = True
-except Exception:
-    trend_df = df
-    has_trend_data = False
-
 # ============================================================
 # HEADER
 # ============================================================
@@ -96,15 +82,10 @@ st.markdown(
 # FILTERS
 # ============================================================
 
-eval_min_date, eval_max_date = df["timestamp"].min().date(), df["timestamp"].max().date()
-min_date = min(eval_min_date, trend_df["timestamp"].min().date())
-max_date = max(eval_max_date, trend_df["timestamp"].max().date())
+min_date, max_date = df["timestamp"].min().date(), df["timestamp"].max().date()
 show_inverter_filter = "inverter_id" in df.columns and df["inverter_id"].nunique() > 1
 
 with st.container(border=True):
-    if not has_trend_data:
-        st.caption("ℹ️ `trend_data.parquet` not found — showing the evaluation period only.")
-
     cols = st.columns([1.2, 1.2, 1, 1, 2] if show_inverter_filter else [1.2, 1.2, 1, 2])
 
     with cols[0]:
@@ -129,8 +110,6 @@ with st.container(border=True):
 
     if start_date > end_date:
         st.warning("Start date is after end date — swap them to see results.")
-    elif has_trend_data and (start_date < eval_min_date or end_date > eval_max_date):
-        st.caption(f"ℹ️ Anomaly detection only covers **{eval_min_date} to {eval_max_date}**. Dates outside that window show raw readings only.")
 
 # ============================================================
 # APPLY FILTERS
@@ -162,49 +141,77 @@ comparison_rows = compare_population_to_baseline(anomaly_df, baseline_reference)
 key_obs = build_key_observations(anomaly_df, events_df, comparison_rows)
 
 # ============================================================
-# OVERVIEW / KPIs
+# TABS  (AI generation first, everything else second)
 # ============================================================
 
-st.markdown("## Overview")
-st.caption("A high-level view of inverter observations and detected anomalies for the selected period.")
-
-kpi_cols = st.columns(4)
-kpi_cols[0].metric("Total Observations", f"{total_observations:,}")
-kpi_cols[1].metric("Anomalous Observations", f"{total_anomalies:,}")
-kpi_cols[2].metric("Anomaly Rate", fmt_num(anomaly_rate, 2, "%"))
-kpi_cols[3].metric("Persistent Events", f"{len(events_df):,}")
-
-if total_observations > 0 and total_anomalies == 0:
-    st.caption("✅ No anomalies found in this period — everything looks normal.")
-
-# ============================================================
-# HEALTHY BASELINE
-# ============================================================
-
-st.markdown("### Healthy Baseline")
-st.caption(
-    "Typical healthy operating range, derived from the trained model's healthy "
-    "reference data. A reading outside this range is not automatically a fault."
-)
-
-baseline_rows = get_healthy_baseline_summary(baseline_df)
-if baseline_rows:
-    baseline_cols = st.columns(len(baseline_rows))
-    for col, (label, value) in zip(baseline_cols, baseline_rows):
-        col.metric(label=label, value=value)
-else:
-    st.caption("No healthy baseline reference values are available for this dataset.")
-
-# ============================================================
-# TABS
-# ============================================================
-
-tab_overview, tab_ai, tab_events = st.tabs(["Overview", "AI Analysis", "Anomaly Events"])
+tab_ai, tab_details = st.tabs(["AI Analysis", "Overview & Events"])
 
 # ------------------------------------------------------------
-# TAB: OVERVIEW
+# TAB: AI ANALYSIS
 # ------------------------------------------------------------
-with tab_overview:
+with tab_ai:
+    st.markdown("## Overall Anomaly Explanation")
+    st.caption(
+        "AI analysis of the recurring patterns across all detected anomalies "
+        "in the selected period. No individual anomaly is selected."
+    )
+
+    if len(anomaly_df) == 0:
+        st.info("No anomalies were detected in the selected period, so there is no anomaly pattern to explain.")
+    else:
+        header_col, button_col = st.columns([5.5, 1.5])
+        header_col.markdown('<div class="ai-title">Why are anomalies occurring?</div>', unsafe_allow_html=True)
+        regenerate = button_col.button(
+            "Regenerate", type="primary", use_container_width=True,
+            help="Generate a fresh overall explanation from all detected anomalies.",
+        )
+
+        cache_key = f"overall_{selected_inverter}_{start_date}_{end_date}"
+        cached = st.session_state["ai_explanations"].get(cache_key)
+
+        if regenerate or cached is None:
+            evidence = build_population_evidence(anomaly_df, events_df, baseline_df, start_date, end_date, selected_inverter)
+            with st.spinner("Analyzing all detected anomalies..."):
+                try:
+                    explanation = generate_overall_ai_explanation(evidence)
+                    checks = validate_overall_explanation(explanation, evidence)
+                    cached = {"explanation": explanation, "checks": checks, "error": None}
+                except Exception as e:
+                    cached = {"explanation": None, "checks": None, "error": str(e)}
+            st.session_state["ai_explanations"][cache_key] = cached
+
+        if cached.get("error"):
+            st.error(f"AI explanation failed: {cached['error']}")
+        elif cached.get("explanation"):
+            checks = cached.get("checks") or []
+            has_fail = any(c.get("status") == "FAIL" for c in checks)
+            render_evidence_consistency(checks)
+            if has_fail:
+                st.error(
+                    "The AI explanation was withheld because one or more claims contradict "
+                    "the supplied evidence. Regenerate after reviewing the checks above."
+                )
+            else:
+                render_ai_explanation(cached["explanation"])
+        else:
+            st.warning("AI did not return an overall explanation.")
+
+# ------------------------------------------------------------
+# TAB: OVERVIEW & EVENTS  (everything else)
+# ------------------------------------------------------------
+with tab_details:
+    st.markdown("## Overview")
+    st.caption("A high-level view of inverter observations and detected anomalies for the selected period.")
+
+    kpi_cols = st.columns(4)
+    kpi_cols[0].metric("Total Observations", f"{total_observations:,}")
+    kpi_cols[1].metric("Anomalous Observations", f"{total_anomalies:,}")
+    kpi_cols[2].metric("Anomaly Rate", fmt_num(anomaly_rate, 2, "%"))
+    kpi_cols[3].metric("Persistent Events", f"{len(events_df):,}")
+
+    if total_observations > 0 and total_anomalies == 0:
+        st.caption("✅ No anomalies found in this period — everything looks normal.")
+
     st.markdown("### Anomaly Score Over Time")
     st.caption(
         "Higher points mean more unusual behavior relative to the trained model. "
@@ -258,60 +265,6 @@ with tab_overview:
     else:
         st.caption("No overlapping variables between the anomaly data and the healthy baseline.")
 
-# ------------------------------------------------------------
-# TAB: AI ANALYSIS
-# ------------------------------------------------------------
-with tab_ai:
-    st.markdown("## Overall Anomaly Explanation")
-    st.caption(
-        "AI analysis of the recurring patterns across all detected anomalies "
-        "in the selected period. No individual anomaly is selected."
-    )
-
-    if len(anomaly_df) == 0:
-        st.info("No anomalies were detected in the selected period, so there is no anomaly pattern to explain.")
-    else:
-        header_col, button_col = st.columns([5.5, 1.5])
-        header_col.markdown('<div class="ai-title">Why are anomalies occurring?</div>', unsafe_allow_html=True)
-        regenerate = button_col.button(
-            "Regenerate", type="primary", use_container_width=True,
-            help="Generate a fresh overall explanation from all detected anomalies.",
-        )
-
-        cache_key = f"overall_{selected_inverter}_{start_date}_{end_date}"
-        cached = st.session_state["ai_explanations"].get(cache_key)
-
-        if regenerate or cached is None:
-            evidence = build_population_evidence(anomaly_df, events_df, baseline_df, start_date, end_date, selected_inverter)
-            with st.spinner("Analyzing all detected anomalies..."):
-                try:
-                    explanation = generate_overall_ai_explanation(evidence)
-                    checks = validate_overall_explanation(explanation, evidence)
-                    cached = {"explanation": explanation, "checks": checks, "error": None}
-                except Exception as e:
-                    cached = {"explanation": None, "checks": None, "error": str(e)}
-            st.session_state["ai_explanations"][cache_key] = cached
-
-        if cached.get("error"):
-            st.error(f"AI explanation failed: {cached['error']}")
-        elif cached.get("explanation"):
-            checks = cached.get("checks") or []
-            has_fail = any(c.get("status") == "FAIL" for c in checks)
-            render_evidence_consistency(checks)
-            if has_fail:
-                st.error(
-                    "The AI explanation was withheld because one or more claims contradict "
-                    "the supplied evidence. Regenerate after reviewing the checks above."
-                )
-            else:
-                render_ai_explanation(cached["explanation"])
-        else:
-            st.warning("AI did not return an overall explanation.")
-
-# ------------------------------------------------------------
-# TAB: ANOMALY EVENTS
-# ------------------------------------------------------------
-with tab_events:
     st.markdown("## Detected Anomaly Events")
     st.caption("Persistent anomaly events detected in the selected period (≥60 minutes of continuous anomalous readings).")
 
