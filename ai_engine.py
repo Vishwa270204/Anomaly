@@ -400,49 +400,63 @@ VALUE_CHANGE_RE = re.compile(
 )
 
 
+MAX_ALIAS_TO_RANGE_GAP = 45  # chars; beyond this, a range likely belongs to a different metric
+
+
+ALL_METRIC_ALIASES = [(alias, metric) for metric, (aliases, _) in METRIC_ALIASES.items() for alias in aliases]
+
+
 def _check_value_change_claims(lower_text, evidence, add):
     """Verify any 'X rises/falls from A to B' claim against the typical
     start/end readings computed from real event data (value_changes).
-    Picks the range nearest to each metric's own mention, so a sentence
-    naming two metrics with two ranges doesn't cross-match them."""
+
+    Range-centric, not alias-centric: for every numeric range found, find
+    the closest metric NAME of any kind (not just the ones we're tracking)
+    and only validate the range if that closest name is one we're tracking.
+    This is what correctly excludes an unrelated range (e.g. an efficiency
+    percentage) from being wrongly attributed to a nearby but unconnected
+    metric mention (e.g. "...efficiency from 86% to 89%, alongside DC power
+    and AC power output...") -- efficiency is the closer name, so the range
+    belongs to it, not to DC/AC power.
+    """
     changes = evidence.get("value_changes", {})
     if not changes:
         add("Before/after value claims", "PASS", "No before/after value evidence is available to check.")
         return
 
+    alias_hits = sorted(
+        (m.start(), m.end(), metric)
+        for alias, metric in ALL_METRIC_ALIASES
+        for m in re.finditer(re.escape(alias), lower_text)
+    )
+
     failures, claim_found = [], False
-    for metric, info in changes.items():
-        aliases = METRIC_ALIASES.get(metric, ([], ""))[0]
+    for range_match in VALUE_CHANGE_RE.finditer(lower_text):
+        r_start, r_end = range_match.start(), range_match.end()
+        preceding = [h for h in alias_hits if h[1] <= r_start and (r_start - h[1]) <= MAX_ALIAS_TO_RANGE_GAP]
+        following = [h for h in alias_hits if h[0] >= r_end and (h[0] - r_end) <= MAX_ALIAS_TO_RANGE_GAP]
+        if preceding:
+            owner_metric = max(preceding, key=lambda h: h[1])[2]  # nearest preceding wins
+        elif following:
+            owner_metric = min(following, key=lambda h: h[0])[2]  # else nearest following
+        else:
+            continue
+
+        info = changes.get(owner_metric)
+        if info is None:
+            continue  # range belongs to a metric we're not tracking value changes for
         typical_start, typical_end = info.get("typical_start"), info.get("typical_end")
         if typical_start is None or typical_end is None:
             continue
-        tolerance = max(3.0, abs(typical_start) * 0.25, abs(typical_end) * 0.25)
 
-        for alias in aliases:
-            for match in re.finditer(re.escape(alias), lower_text):
-                left = max((lower_text.rfind(c, 0, match.start()) for c in SENTENCE_BOUNDARY), default=-1) + 1
-                right_candidates = [lower_text.find(c, match.end()) for c in SENTENCE_BOUNDARY]
-                right = min([p for p in right_candidates if p >= 0], default=len(lower_text))
-                window, alias_pos = lower_text[left:right], match.start() - left
-                alias_end_pos = match.end() - left
-                candidates = list(VALUE_CHANGE_RE.finditer(window))
-                if not candidates:
-                    continue
-                # Natural phrasing states a metric's own range right after its
-                # name ("temperature climbs from X to Y"), so prefer the
-                # nearest range that follows the alias; only fall back to a
-                # preceding range if none follows (avoids grabbing a
-                # different metric's range from earlier in the sentence).
-                following = [c for c in candidates if c.start() >= alias_end_pos]
-                nearest = min(following, key=lambda m: m.start() - alias_end_pos) if following \
-                    else min(candidates, key=lambda m: alias_pos - m.end())
-                claim_found = True
-                claimed_start, claimed_end = float(nearest.group(1)), float(nearest.group(2))
-                if abs(claimed_start - typical_start) > tolerance or abs(claimed_end - typical_end) > tolerance:
-                    failures.append(
-                        f"{info['label']}: claims {claimed_start:g} → {claimed_end:g}, but the typical "
-                        f"reading is ~{typical_start:.1f} → ~{typical_end:.1f} {info['unit']}"
-                    )
+        tolerance = max(3.0, abs(typical_start) * 0.25, abs(typical_end) * 0.25)
+        claim_found = True
+        claimed_start, claimed_end = float(range_match.group(1)), float(range_match.group(2))
+        if abs(claimed_start - typical_start) > tolerance or abs(claimed_end - typical_end) > tolerance:
+            failures.append(
+                f"{info['label']}: claims {claimed_start:g} → {claimed_end:g}, but the typical "
+                f"reading is ~{typical_start:.1f} → ~{typical_end:.1f} {info['unit']}"
+            )
 
     if failures:
         add("Before/after value claims", "FAIL", "; ".join(dict.fromkeys(failures))[:400] + ("..." if len("; ".join(failures)) > 400 else "."))
