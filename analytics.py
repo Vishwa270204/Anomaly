@@ -185,6 +185,13 @@ def build_key_observations(anomaly_df, events_df, comparison_rows):
 # ANOMALY EVENTS
 # ============================================================
 
+VALUE_CHANGE_METRICS = [
+    ("dc_power_kw", "DC power", "kW"),
+    ("ac_power_kw", "AC power", "kW"),
+    ("inverter_temperature_c", "Inverter temperature", "°C"),
+]
+
+
 def build_anomaly_events(anomaly_df):
     """Group anomalous readings into persistent events.
 
@@ -229,6 +236,12 @@ def build_anomaly_events(anomaly_df):
         if "anomaly_type" in rows.columns:
             mode = rows["anomaly_type"].mode()
             event["anomaly_type"] = mode.iloc[0] if len(mode) else None
+        for col, _, _ in VALUE_CHANGE_METRICS:
+            if col in rows.columns:
+                series = pd.to_numeric(rows[col], errors="coerce").dropna()
+                if not series.empty:
+                    event[f"{col}_start"] = series.iloc[0]
+                    event[f"{col}_end"] = series.iloc[-1]
         events.append(event)
 
     events_df = pd.DataFrame(events).sort_values("start_time").reset_index(drop=True)
@@ -241,6 +254,30 @@ def build_anomaly_events(anomaly_df):
 # (shared by the AI generator, the AI evidence-consistency validator, and
 #  the standalone data_validation module)
 # ============================================================
+
+def build_value_change_evidence(events_df):
+    """Typical start -> end reading per metric, averaged across all
+    persistent events -- gives the AI real numbers to explain WHY an event
+    looks anomalous (e.g. 'DC power typically drops from ~52 to ~30 kW')."""
+    changes = {}
+    if events_df is None or events_df.empty:
+        return changes
+    for col, label, unit in VALUE_CHANGE_METRICS:
+        start_col, end_col = f"{col}_start", f"{col}_end"
+        if start_col not in events_df.columns or end_col not in events_df.columns:
+            continue
+        starts = pd.to_numeric(events_df[start_col], errors="coerce").dropna()
+        ends = pd.to_numeric(events_df[end_col], errors="coerce").dropna()
+        if starts.empty or ends.empty:
+            continue
+        changes[col] = {
+            "label": label,
+            "unit": unit,
+            "typical_start": clean_value(starts.mean()),
+            "typical_end": clean_value(ends.mean()),
+        }
+    return changes
+
 
 def build_population_evidence(anomaly_df, events_df, baseline_df, start_date, end_date, selected_inverter):
     """One evidence structure for the whole anomaly population in scope."""
@@ -269,6 +306,7 @@ def build_population_evidence(anomaly_df, events_df, baseline_df, start_date, en
         event_patterns["earliest_event_start"] = clean_value(events_df["start_time"].min())
         event_patterns["latest_event_end"] = clean_value(events_df["end_time"].max())
     evidence["event_patterns"] = event_patterns
+    evidence["value_changes"] = build_value_change_evidence(events_df)
 
     operating_patterns = {}
     for col in ["inverter_status", "is_daylight", "quality_code", "communication_status", "fault_code", "alarm_code"]:
