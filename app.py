@@ -171,12 +171,15 @@ with tab_ai:
             st.error(f"AI explanation failed: {cached['error']}")
         elif cached.get("explanation"):
             checks = cached.get("checks") or []
-            has_fail = any(c.get("status") == "FAIL" for c in checks)
-            if has_fail:
+            failed = [c for c in checks if c.get("status") == "FAIL"]
+            if failed:
                 st.error(
                     "The AI explanation was withheld because one or more claims contradict "
                     "the supplied evidence. Try regenerating."
                 )
+                with st.expander("Why was it withheld?", expanded=True):
+                    for c in failed:
+                        st.markdown(f"**{c.get('name', 'Check')}** — {c.get('detail', '')}")
             else:
                 render_ai_explanation(cached["explanation"])
         else:
