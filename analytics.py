@@ -7,8 +7,6 @@ shared between what the dashboard displays and what gets sent to the AI /
 validation layer (so the numbers on screen and the numbers the AI sees can
 never disagree).
 """
-from datetime import datetime
-
 import pandas as pd
 import streamlit as st
 
@@ -140,45 +138,6 @@ def compare_population_to_baseline(anomaly_df, baseline_reference):
             "status": status,
         })
     return rows
-
-
-# ============================================================
-# KEY OBSERVATIONS
-# ============================================================
-
-def build_key_observations(anomaly_df, events_df, comparison_rows):
-    """Operator-facing summary answering 'what should I investigate first?'.
-    Built only from values computed elsewhere — no new claims."""
-    obs = {
-        "anomaly_count": int(len(anomaly_df)),
-        "event_count": int(len(events_df)),
-        "typical_duration": None,
-        "max_severity": None,
-        "top_features": [],
-        "off_baseline_metrics": [],
-    }
-    if not events_df.empty and "duration_min" in events_df.columns:
-        durations = pd.to_numeric(events_df["duration_min"], errors="coerce").dropna()
-        if not durations.empty:
-            obs["typical_duration"] = float(durations.median())
-
-    if "anomaly_score_ratio" in anomaly_df.columns:
-        scores = pd.to_numeric(anomaly_df["anomaly_score_ratio"], errors="coerce").dropna()
-        if not scores.empty:
-            obs["max_severity"] = float(scores.max())
-
-    contribution_cols = get_contribution_cols(anomaly_df)
-    if contribution_cols:
-        means = (
-            anomaly_df[contribution_cols].apply(pd.to_numeric, errors="coerce")
-            .mean().dropna().sort_values(ascending=False)
-        )
-        obs["top_features"] = [c.replace("_contribution_pct", "") for c in means.head(3).index]
-
-    obs["off_baseline_metrics"] = [
-        r["label"] for r in comparison_rows if r["status"] in ("Above typical range", "Below typical range")
-    ]
-    return obs
 
 
 # ============================================================
