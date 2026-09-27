@@ -84,7 +84,7 @@ st.markdown(
 min_date, max_date = df["timestamp"].min().date(), df["timestamp"].max().date()
 show_inverter_filter = "inverter_id" in df.columns and df["inverter_id"].nunique() > 1
 
-show_anomalies_only = False
+
 
 if show_inverter_filter:
     inverter_options = ["All"] + sorted(df["inverter_id"].dropna().unique().tolist())
@@ -102,8 +102,6 @@ filtered_df = df.copy()
 
 if selected_inverter != "All" and "inverter_id" in filtered_df.columns:
     filtered_df = filtered_df[filtered_df["inverter_id"] == selected_inverter].copy()
-if show_anomalies_only:
-    filtered_df = filtered_df[filtered_df["anomaly_flag"]].copy()
 
 if filtered_df.empty:
     st.warning("No observations match the current filters. Adjust the filters above.")
