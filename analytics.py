@@ -53,13 +53,6 @@ def load_dashboard_data(path="dashboard_data.parquet"):
 
 
 @st.cache_data
-def load_trend_data(path="trend_data.parquet"):
-    df = pd.read_parquet(path)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-
-
-@st.cache_data
 def load_dashboard_baseline(path="dashboard_baseline.parquet"):
     baseline = pd.read_parquet(path)
     numeric_cols = [c for c in baseline.columns if c.endswith(("_median", "_q10", "_q90"))]
@@ -89,23 +82,6 @@ def safe_load(loader, path, label):
 # ============================================================
 # HEALTHY BASELINE
 # ============================================================
-
-def get_healthy_baseline_summary(baseline_df):
-    """Aggregate the healthy-baseline quantile table into simple headline
-    ranges. Returns a list of (label, value_str) pairs; empty if unusable."""
-    if baseline_df is None or baseline_df.empty:
-        return []
-    rows = []
-    for feature, label, unit in COMPARISON_METRICS:
-        q10_col, q90_col = f"{feature}_q10", f"{feature}_q90"
-        if q10_col not in baseline_df.columns or q90_col not in baseline_df.columns:
-            continue
-        low = pd.to_numeric(baseline_df[q10_col], errors="coerce").median()
-        high = pd.to_numeric(baseline_df[q90_col], errors="coerce").median()
-        if pd.notna(low) and pd.notna(high):
-            rows.append((label, f"{low:.1f}–{high:.1f}{unit}"))
-    return rows
-
 
 def aggregate_baseline_reference(baseline_df, metrics):
     """Median-of-medians reference values for each metric across all
