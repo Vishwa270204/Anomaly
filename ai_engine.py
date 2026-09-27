@@ -43,8 +43,8 @@ SYSTEM_PROMPT = (
 
 EXPLANATION_JSON_SCHEMA = """{
   "headline": "One short sentence describing the overall anomaly pattern in plain, general terms.",
-  "summary": "2-3 plain-language sentences describing what is generally happening -- no timestamps, counts, or exact figures.",
-  "why_it_happened": ["general pattern-based reason 1", "general pattern-based reason 2", "general pattern-based reason 3"],
+  "summary": "2-3 sentences describing what is generally happening and WHY -- cite the actual before/after numbers from value_changes (e.g. 'DC power drops from ~52 kW to ~30 kW while temperature climbs from ~40C to ~58C') and/or the baseline comparison. This is the one place exact figures belong.",
+  "why_it_happened": ["a clear reason citing the value_changes numbers and/or baseline comparison", "reason 2", "reason 3"],
   "when_occurred": {
     "time_pattern": "A general description of when this tends to happen (e.g. 'mostly during high-load daylight hours'), only if supported by evidence. No specific dates or clock times.",
     "duration_pattern": "A general sense of how long or how often this tends to happen (e.g. 'lasts around an hour' or 'happens occasionally'), only if supported by evidence. Avoid exact counts or precise minute figures.",
@@ -55,13 +55,22 @@ EXPLANATION_JSON_SCHEMA = """{
 
 EXPLANATION_RULES = """Rules:
 - Write like a plant operator summarizing a pattern to a colleague, not like a data
-  report. Describe trends and tendencies in general, qualitative language.
+  report -- EXCEPT for the actual measurement values, which should be concrete.
+- The "value_changes" evidence gives the typical start -> end reading for key metrics
+  across all events (e.g. dc_power_kw typical_start -> typical_end). Use these real
+  numbers in "summary" and "why_it_happened" to explain what physically happens during
+  an event (e.g. "DC power falls from about 52 kW to 30 kW"). Round to whole numbers or
+  one decimal place -- don't restate more precision than was supplied.
+- The healthy-baseline comparison (e.g. "temperature ran above the typical healthy
+  range") is also good supporting detail for WHY -- include it when relevant.
 - Do NOT cite exact event counts, timestamps, dates, or precise durations (e.g. never
   say "2 persistent events" or "62.4 minutes" or "from 2026-01-01 08:20"). If a duration
   or frequency is worth mentioning, round it to something conversational ("about an
-  hour", "a handful of times", "briefly") instead of an exact figure.
-- Use only the evidence below to decide what pattern to describe; never invent a
-  measurement, date, or count -- just don't restate the raw numbers themselves.
+  hour", "a handful of times", "briefly") instead of an exact figure. This restriction
+  is only about counts/timestamps/durations -- value_changes and baseline numbers are
+  exempt and should be used.
+- Use only the evidence below to decide what pattern and numbers to cite; never invent
+  a measurement, date, count, or comparison that isn't supplied.
 - Feature contributions show variables associated with unusual reconstruction error --
   they do not prove physical root cause. Never say "root cause" or "caused by".
 - Never call anomaly_score_ratio or reconstruction_error a probability or confidence value.
@@ -161,6 +170,7 @@ def validate_overall_explanation(explanation, evidence):
     _check_operating_conditions(when, evidence, add)
     _check_feature_contributions(lower_text, evidence, add)
     _check_metric_values(lower_text, evidence, add)
+    _check_value_change_claims(lower_text, evidence, add)
     _check_baseline_direction(lower_text, evidence, add)
 
     return checks
@@ -344,9 +354,15 @@ SENTENCE_BOUNDARY = ".!?;"
 
 def _check_metric_values(lower_text, evidence, add):
     stats = evidence.get("anomaly_observations", {}).get("statistics", {})
+    # dc_power_kw / ac_power_kw / inverter_temperature_c are validated as
+    # before/after ranges by _check_value_change_claims instead -- checking
+    # them here too would double-flag the same numbers out of context.
+    skip_metrics = set(evidence.get("value_changes", {}).keys())
     failures = []
 
     for metric, (aliases, expected_unit) in METRIC_ALIASES.items():
+        if metric in skip_metrics:
+            continue
         metric_stats = stats.get(metric)
         if not isinstance(metric_stats, dict):
             continue
@@ -374,6 +390,66 @@ def _check_metric_values(lower_text, evidence, add):
         add("Metric-specific numerical claims", "FAIL", "Unsupported metric/value combination(s): " + ", ".join(failures[:5]) + ".")
     else:
         add("Metric-specific numerical claims", "PASS", "Numeric metric claims match the statistics of the metric they describe.")
+
+
+VALUE_CHANGE_RE = re.compile(
+    r"from\s+(?:about\s+|around\s+|roughly\s+|approximately\s+|~\s*)?(-?\d+(?:\.\d+)?)\s*[a-z°/%]*\s*"
+    r"(?:to|down to|up to|rising to|climbing to|falling to|dropping to)\s+"
+    r"(?:about\s+|around\s+|roughly\s+|approximately\s+|~\s*)?(-?\d+(?:\.\d+)?)",
+    re.I,
+)
+
+
+def _check_value_change_claims(lower_text, evidence, add):
+    """Verify any 'X rises/falls from A to B' claim against the typical
+    start/end readings computed from real event data (value_changes).
+    Picks the range nearest to each metric's own mention, so a sentence
+    naming two metrics with two ranges doesn't cross-match them."""
+    changes = evidence.get("value_changes", {})
+    if not changes:
+        add("Before/after value claims", "PASS", "No before/after value evidence is available to check.")
+        return
+
+    failures, claim_found = [], False
+    for metric, info in changes.items():
+        aliases = METRIC_ALIASES.get(metric, ([], ""))[0]
+        typical_start, typical_end = info.get("typical_start"), info.get("typical_end")
+        if typical_start is None or typical_end is None:
+            continue
+        tolerance = max(3.0, abs(typical_start) * 0.25, abs(typical_end) * 0.25)
+
+        for alias in aliases:
+            for match in re.finditer(re.escape(alias), lower_text):
+                left = max((lower_text.rfind(c, 0, match.start()) for c in SENTENCE_BOUNDARY), default=-1) + 1
+                right_candidates = [lower_text.find(c, match.end()) for c in SENTENCE_BOUNDARY]
+                right = min([p for p in right_candidates if p >= 0], default=len(lower_text))
+                window, alias_pos = lower_text[left:right], match.start() - left
+                alias_end_pos = match.end() - left
+                candidates = list(VALUE_CHANGE_RE.finditer(window))
+                if not candidates:
+                    continue
+                # Natural phrasing states a metric's own range right after its
+                # name ("temperature climbs from X to Y"), so prefer the
+                # nearest range that follows the alias; only fall back to a
+                # preceding range if none follows (avoids grabbing a
+                # different metric's range from earlier in the sentence).
+                following = [c for c in candidates if c.start() >= alias_end_pos]
+                nearest = min(following, key=lambda m: m.start() - alias_end_pos) if following \
+                    else min(candidates, key=lambda m: alias_pos - m.end())
+                claim_found = True
+                claimed_start, claimed_end = float(nearest.group(1)), float(nearest.group(2))
+                if abs(claimed_start - typical_start) > tolerance or abs(claimed_end - typical_end) > tolerance:
+                    failures.append(
+                        f"{info['label']}: claims {claimed_start:g} → {claimed_end:g}, but the typical "
+                        f"reading is ~{typical_start:.1f} → ~{typical_end:.1f} {info['unit']}"
+                    )
+
+    if failures:
+        add("Before/after value claims", "FAIL", "; ".join(dict.fromkeys(failures))[:400] + ("..." if len("; ".join(failures)) > 400 else "."))
+    elif claim_found:
+        add("Before/after value claims", "PASS", "Before/after value claims match the typical start/end readings.")
+    else:
+        add("Before/after value claims", "WARN", "value_changes evidence was supplied, but no before/after value claim was made.")
 
 
 def _check_baseline_direction(lower_text, evidence, add):
