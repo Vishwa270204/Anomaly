@@ -177,17 +177,6 @@ with tab_ai:
                     "The AI explanation was withheld because one or more claims contradict "
                     "the supplied evidence. Try regenerating."
                 )
-                # Diagnostic details: keep these visible while tuning the
-                # evidence/validator contract. This shows the exact validator
-                # rule that rejected the generated explanation.
-                failed_checks = [
-                    c for c in checks
-                    if c.get("status") == "FAIL"
-                ]
-                with st.expander("Why was the explanation withheld?", expanded=True):
-                    for check in failed_checks:
-                        st.write(f"**{check.get('name', 'Validation check')}**")
-                        st.code(str(check.get("detail", "No detail supplied")))
             else:
                 render_ai_explanation(cached["explanation"])
         else:
