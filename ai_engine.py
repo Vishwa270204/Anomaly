@@ -461,11 +461,14 @@ def _check_value_change_claims(lower_text, evidence, add):
 
 
 def _check_baseline_numeric_claims(lower_text, evidence, add):
-    """Check common numeric claims against baseline comparison evidence.
+    """Validate baseline numbers without confusing units or percentage direction.
 
-    This intentionally checks only the quantitative baseline values that the
-    prompt encourages the model to cite. It does not require the model to
-    mention numbers, and it does not infer causality from them.
+    The previous validator treated every number in a sentence as if it were the
+    same kind of quantity. That can falsely reject perfectly valid text such as
+    "31.4 kW, about 40% below the healthy median": 31.4 is a power value while
+    40 is a percentage. This version matches claims to the metric and unit and
+    treats percentage differences by magnitude, while checking directional words
+    separately in _check_baseline_direction().
     """
     rows = evidence.get("baseline_comparisons", [])
     if not isinstance(rows, list) or not rows:
@@ -480,10 +483,41 @@ def _check_baseline_numeric_claims(lower_text, evidence, add):
         "power factor": "Power Factor",
         "dc current": "DC Current",
     }
-    unit_re = r"(?:kW|kw|A|a|°C|C|%|Hz|hz|ms|W/m2|w/m2)?"
-    number_re = re.compile(rf"(-?\d+(?:\.\d+)?)\s*{unit_re}\b")
+    # Capture the unit so 40% is not compared against 40 kW, 40 A, etc.
+    number_re = re.compile(
+        r"(?<![A-Za-z0-9])(-?\d+(?:\.\d+)?)\s*(kW|A|°C|C|%|Hz|ms|W/m2)?\b",
+        re.I,
+    )
+
+    def expected_for_unit(row, unit):
+        unit = (unit or "").lower().replace("°c", "c")
+        if unit == "%":
+            keys = ["difference_percent"]
+        elif unit in {"kw", "a", "c", "hz", "ms", "w/m2"}:
+            keys = [
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median",
+            ]
+        else:
+            # An unqualified number is allowed only when it is close to one of
+            # the metric's supplied values. This preserves compatibility with
+            # concise AI wording while avoiding cross-unit percentage matches.
+            keys = [
+                "observed_mean", "observed_median", "healthy_median",
+                "healthy_q10", "healthy_q90", "difference_from_healthy_median",
+                "difference_percent",
+            ]
+        return [
+            float(row[k]) for k in keys
+            if isinstance(row.get(k), (int, float)) and pd.notna(row.get(k))
+        ]
+
     failures = []
     checked = False
+
+    # Split into sentences so numbers belonging to another metric elsewhere in
+    # the explanation cannot be attributed to this metric.
+    sentence_spans = list(re.finditer(r"[^.!?;]+(?:[.!?;]|$)", lower_text))
 
     for row in rows:
         if not isinstance(row, dict):
@@ -493,65 +527,103 @@ def _check_baseline_numeric_claims(lower_text, evidence, add):
         aliases = [alias for alias in metric_aliases if alias in label_lower]
         if not aliases:
             continue
+
         alias = aliases[0]
-        positions = [m.start() for m in re.finditer(re.escape(alias), lower_text)]
-        if not positions:
-            continue
+        expected_by_unit = {}
+        for unit in ("kw", "a", "c", "%", "hz", "ms", "w/m2", ""):
+            expected_by_unit[unit] = expected_for_unit(row, unit)
 
-        expected = []
-        for key in (
-            "observed_mean", "observed_median", "healthy_median",
-            "healthy_q10", "healthy_q90", "difference_from_healthy_median",
-            "difference_percent",
-        ):
-            value = row.get(key)
-            if isinstance(value, (int, float)) and pd.notna(value):
-                expected.append(float(value))
-
-        if not expected:
-            continue
-
-        checked = True
-        for pos in positions:
-            left = max((lower_text.rfind(c, 0, pos) for c in SENTENCE_BOUNDARY), default=-1) + 1
-            right_candidates = [lower_text.find(c, pos) for c in SENTENCE_BOUNDARY]
-            right = min([p for p in right_candidates if p >= 0], default=len(lower_text))
-            sentence = lower_text[left:right]
-            claims = [float(m.group(1)) for m in number_re.finditer(sentence)]
-            if not claims:
+        for span in sentence_spans:
+            sentence = span.group(0)
+            if alias not in sentence:
                 continue
 
-            # Baseline comparison values may be expressed with different units
-            # in one sentence. We only fail when a claimed number is clearly
-            # incompatible with every supplied numeric value for that metric.
+            checked = True
+            claims = list(number_re.finditer(sentence))
             for claim in claims:
-                if not any(abs(claim - exp) <= max(0.5, abs(exp) * 0.05) for exp in expected):
-                    failures.append(f"{label}: {claim:g} is not supported by the supplied baseline comparison values")
+                raw = float(claim.group(1))
+                unit = (claim.group(2) or "").lower().replace("°c", "c")
+                expected = expected_by_unit.get(unit, expected_by_unit[""])
+                if not expected:
+                    continue
+
+                # Percent differences are commonly written as positive magnitude
+                # with directional language: "40% lower". Compare magnitude.
+                candidates = expected
+                if unit == "%":
+                    candidates = [abs(v) for v in candidates]
+                    raw_cmp = abs(raw)
+                else:
+                    raw_cmp = raw
+
+                if not any(abs(raw_cmp - exp) <= max(0.5, abs(exp) * 0.05) for exp in candidates):
+                    failures.append(
+                        f"{label}: {raw:g}{claim.group(2) or ''} is not supported by the supplied baseline comparison values"
+                    )
 
     if failures:
-        add("Baseline numerical claims", "FAIL", "; ".join(dict.fromkeys(failures))[:500] + ("..." if len("; ".join(failures)) > 500 else "."))
+        detail = "; ".join(dict.fromkeys(failures))
+        add("Baseline numerical claims", "FAIL", detail[:500] + ("..." if len(detail) > 500 else "."))
     elif checked:
-        add("Baseline numerical claims", "PASS", "Numeric baseline claims match the supplied comparison values.")
+        add("Baseline numerical claims", "PASS", "Numeric baseline claims match the supplied comparison values and units.")
     else:
         add("Baseline numerical claims", "PASS", "No numeric baseline claim requiring verification was made.")
 
+
 def _check_baseline_direction(lower_text, evidence, add):
+    """Check baseline direction in the same sentence as the metric.
+
+    The earlier implementation searched the entire explanation. If one metric
+    was above baseline and another was below baseline, a direction word for the
+    first metric could accidentally satisfy the check for the second. This
+    sentence-local check avoids that false positive/false negative.
+    """
     rows = evidence.get("baseline_comparisons", [])
     failures, claim_found = [], False
+
+    direction_words = {
+        "above": r"above|higher|elevated|exceed|greater than|increased|higher than",
+        "below": r"below|lower|reduced|decreased|less than|lower than",
+    }
+
+    sentence_spans = list(re.finditer(r"[^.!?;]+(?:[.!?;]|$)", lower_text))
 
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        label = str(row.get("label", "")).lower()
+        label = str(row.get("label", ""))
+        label_lower = label.lower()
         status = str(row.get("status", "")).lower()
-        tokens = [t for t in re.findall(r"[a-z0-9]+", label) if len(t) >= 3]
-        if not tokens or not any(t in lower_text for t in tokens):
+        aliases = [alias for alias in (
+            "dc power", "ac power", "temperature", "efficiency",
+            "power factor", "dc current"
+        ) if alias in label_lower]
+        if not aliases or status not in {"above typical range", "below typical range"}:
             continue
-        claim_found = True
-        if "above typical range" in status and not re.search(r"above|higher|elevated|exceed|greater than", lower_text):
-            failures.append(f"{label}: evidence is above typical range, but AI doesn't support that direction")
-        elif "below typical range" in status and not re.search(r"below|lower|reduced|decreased|less than", lower_text):
-            failures.append(f"{label}: evidence is below typical range, but AI doesn't support that direction")
+
+        alias = aliases[0]
+        matched_sentence = False
+        for span in sentence_spans:
+            sentence = span.group(0)
+            if alias not in sentence:
+                continue
+            matched_sentence = True
+            claim_found = True
+            if status == "above typical range":
+                if not re.search(direction_words["above"], sentence):
+                    failures.append(
+                        f"{label}: evidence is above typical range, but the sentence containing {label} does not state an above/higher direction"
+                    )
+            elif status == "below typical range":
+                if not re.search(direction_words["below"], sentence):
+                    failures.append(
+                        f"{label}: evidence is below typical range, but the sentence containing {label} does not state a below/lower direction"
+                    )
+
+        # Mentioning the metric without a directional claim is fine; the AI is
+        # not required to discuss every baseline comparison.
+        if not matched_sentence:
+            continue
 
     if failures:
         add("Healthy-baseline claims", "FAIL", "; ".join(failures[:3]))
@@ -559,3 +631,4 @@ def _check_baseline_direction(lower_text, evidence, add):
         add("Healthy-baseline claims", "PASS", "Baseline-direction claims are consistent with the supplied comparison.")
     else:
         add("Healthy-baseline claims", "PASS", "No unsupported baseline-direction claim was detected.")
+
