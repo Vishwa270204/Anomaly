@@ -1,11 +1,10 @@
 """Data loading and analytics.
 
-Everything here is pure data-crunching: reading the CSV (or JSON / Parquet)
-files the notebook produces, detecting persistent anomaly events, comparing
-anomalies to the healthy baseline, and assembling the evidence structures
-that are shared between what the dashboard displays and what gets sent to
-the AI / validation layer (so the numbers on screen and the numbers the AI
-sees can never disagree).
+Everything here is pure data-crunching: reading the CSV
+files the notebook produces, detecting persistent anomaly events,
+comparing anomalies to the healthy baseline, and assembling the
+evidence structures that are shared between what the dashboard
+displays and what gets sent to the AI / validation layer.
 """
 import pandas as pd
 import streamlit as st
@@ -42,14 +41,8 @@ EVENT_MAX_GAP_MIN = SAMPLE_INTERVAL_MIN * 1.5
 # ============================================================
 
 def read_table(path):
-    """Read a data file by extension: .csv, .json (records) or .parquet."""
-    lower = str(path).lower()
-    if lower.endswith(".csv"):
-        return pd.read_csv(path)
-    if lower.endswith(".json"):
-        return pd.read_json(path, orient="records")
-    return pd.read_parquet(path)
-
+    """Read a dashboard data file from CSV."""
+    return pd.read_csv(path)
 
 def to_bool_series(series):
     """Parse booleans that CSV/JSON store as text. A plain astype(bool)
