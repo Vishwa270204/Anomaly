@@ -3,16 +3,14 @@ Inverter Anomaly Detection -- Streamlit Dashboard
 ====================================================
 Production frontend only. All ML/training happens in inverter_anomaly.ipynb.
 
-Reads CSV files:
-    dashboard_data      -> evaluation-period observations + model output
-    dashboard_baseline  -> healthy operating baseline (quantiles)
+Reads:
+    dashboard_data.parquet      -> evaluation-period observations + model output
+    dashboard_baseline.parquet  -> healthy operating baseline (quantiles)
 
 Does NOT retrain or re-run the notebook. Does NOT treat anomaly_score_ratio
 as a probability. Feature contributions are reported as "contributed most
 to reconstruction error," never as a proven cause.
 """
-import os
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -33,18 +31,6 @@ from data_validation import summarize, validate_event_data
 from components import render_ai_explanation
 from styles import DASHBOARD_CSS
 from utils import fmt_num
-
-
-def resolve_data_path(base_name):
-    """Return the CSV path for the dashboard data."""
-    candidate = base_name + ".csv"
-
-    if os.path.exists(candidate):
-        return candidate
-
-    # Return the expected path so safe_load gives a clear error.
-    return candidate
-
 
 # ============================================================
 # PAGE SETUP
@@ -67,14 +53,11 @@ st.session_state["ai_explanations"] = {
 # LOAD DATA
 # ============================================================
 
-data_path = resolve_data_path("dashboard_data")
-baseline_path = resolve_data_path("dashboard_baseline")
-
-df = safe_load(load_dashboard_data, data_path, "Dashboard data")
-baseline_df = safe_load(load_dashboard_baseline, baseline_path, "Dashboard healthy baseline")
+df = safe_load(load_dashboard_data, "dashboard_data.parquet", "Dashboard data")
+baseline_df = safe_load(load_dashboard_baseline, "dashboard_baseline.parquet", "Dashboard healthy baseline")
 
 if df.empty:
-    st.error(f"`{data_path}` loaded but contains no rows.")
+    st.error("`dashboard_data.parquet` loaded but contains no rows.")
     st.stop()
 
 # ============================================================
@@ -100,6 +83,8 @@ st.markdown(
 
 min_date, max_date = df["timestamp"].min().date(), df["timestamp"].max().date()
 show_inverter_filter = "inverter_id" in df.columns and df["inverter_id"].nunique() > 1
+
+
 
 if show_inverter_filter:
     inverter_options = ["All"] + sorted(df["inverter_id"].dropna().unique().tolist())
