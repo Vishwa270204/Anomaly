@@ -1,11 +1,11 @@
 """Data loading and analytics.
 
-Everything here is pure data-crunching: reading the parquet files the
-notebook produces, detecting persistent anomaly events, comparing anomalies
-to the healthy baseline, and assembling the evidence structures that are
-shared between what the dashboard displays and what gets sent to the AI /
-validation layer (so the numbers on screen and the numbers the AI sees can
-never disagree).
+Everything here is pure data-crunching: reading the CSV (or JSON / Parquet)
+files the notebook produces, detecting persistent anomaly events, comparing
+anomalies to the healthy baseline, and assembling the evidence structures
+that are shared between what the dashboard displays and what gets sent to
+the AI / validation layer (so the numbers on screen and the numbers the AI
+sees can never disagree).
 """
 import pandas as pd
 import streamlit as st
@@ -38,21 +38,43 @@ EVENT_MAX_GAP_MIN = SAMPLE_INTERVAL_MIN * 1.5
 
 
 # ============================================================
-# LOADING (cached — parquet files are read once per session)
+# LOADING (cached — data files are read once per session)
 # ============================================================
 
+def read_table(path):
+    """Read a data file by extension: .csv, .json (records) or .parquet."""
+    lower = str(path).lower()
+    if lower.endswith(".csv"):
+        return pd.read_csv(path)
+    if lower.endswith(".json"):
+        return pd.read_json(path, orient="records")
+    return pd.read_parquet(path)
+
+
+def to_bool_series(series):
+    """Parse booleans that CSV/JSON store as text. A plain astype(bool)
+    would turn the string 'False' into True and flag every row anomalous."""
+    if series.dtype == bool:
+        return series
+    mapped = (
+        series.astype(str).str.strip().str.lower()
+        .map({"true": True, "1": True, "1.0": True, "false": False, "0": False, "0.0": False})
+    )
+    return mapped.fillna(False).astype(bool)
+
+
 @st.cache_data
-def load_dashboard_data(path="dashboard_data.parquet"):
-    df = pd.read_parquet(path)
+def load_dashboard_data(path="dashboard_data.csv"):
+    df = read_table(path)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    df["anomaly_flag"] = df["anomaly_flag"].fillna(False).astype(bool) if "anomaly_flag" in df.columns else False
+    df["anomaly_flag"] = to_bool_series(df["anomaly_flag"]) if "anomaly_flag" in df.columns else False
     return df
 
 
 @st.cache_data
-def load_dashboard_baseline(path="dashboard_baseline.parquet"):
-    baseline = pd.read_parquet(path)
+def load_dashboard_baseline(path="dashboard_baseline.csv"):
+    baseline = read_table(path)
     numeric_cols = [c for c in baseline.columns if c.endswith(("_median", "_q10", "_q90"))]
     for col in numeric_cols:
         baseline[col] = pd.to_numeric(baseline[col], errors="coerce")
@@ -62,7 +84,7 @@ def load_dashboard_baseline(path="dashboard_baseline.parquet"):
 
 
 def safe_load(loader, path, label):
-    """Load a required parquet file, stopping the app with a readable error
+    """Load a required data file, stopping the app with a readable error
     instead of crashing on a missing/broken file."""
     try:
         return loader(path)
@@ -81,6 +103,14 @@ def safe_load(loader, path, label):
 # HEALTHY BASELINE
 # ============================================================
 
+def _numeric_column(frame, col):
+    """Numeric, NaN-free values of a column, or an empty Series if the
+    column is absent (pd.to_numeric(None) would raise)."""
+    if col not in frame.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(frame[col], errors="coerce").dropna()
+
+
 def aggregate_baseline_reference(baseline_df, metrics):
     """Median-of-medians reference values for each metric across all
     healthy baseline groups — a population-level reference, not matched to
@@ -89,14 +119,11 @@ def aggregate_baseline_reference(baseline_df, metrics):
     if baseline_df is None or baseline_df.empty:
         return reference
     for metric in metrics:
-        median_col, q10_col, q90_col = f"{metric}_median", f"{metric}_q10", f"{metric}_q90"
-        if median_col not in baseline_df.columns:
-            continue
-        med = pd.to_numeric(baseline_df[median_col], errors="coerce").dropna()
+        med = _numeric_column(baseline_df, f"{metric}_median")
         if med.empty:
             continue
-        q10 = pd.to_numeric(baseline_df.get(q10_col), errors="coerce").dropna()
-        q90 = pd.to_numeric(baseline_df.get(q90_col), errors="coerce").dropna()
+        q10 = _numeric_column(baseline_df, f"{metric}_q10")
+        q90 = _numeric_column(baseline_df, f"{metric}_q90")
         reference[metric] = {
             "median": clean_value(med.median()),
             "typical_low_q10": clean_value(q10.median()) if not q10.empty else None,
