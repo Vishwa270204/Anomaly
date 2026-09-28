@@ -3,7 +3,7 @@ Inverter Anomaly Detection -- Streamlit Dashboard
 ====================================================
 Production frontend only. All ML/training happens in inverter_anomaly.ipynb.
 
-Reads (CSV preferred; JSON or Parquet also accepted):
+Reads CSV files:
     dashboard_data      -> evaluation-period observations + model output
     dashboard_baseline  -> healthy operating baseline (quantiles)
 
@@ -36,14 +36,14 @@ from utils import fmt_num
 
 
 def resolve_data_path(base_name):
-    """Return '<base_name>.csv', '.json' or '.parquet' (first one that exists,
-    in that order). Falls back to the .csv name so a missing file produces a
-    clear 'not found' message from safe_load."""
-    for ext in (".csv", ".json", ".parquet"):
-        candidate = base_name + ext
-        if os.path.exists(candidate):
-            return candidate
-    return base_name + ".csv"
+    """Return the CSV path for the dashboard data."""
+    candidate = base_name + ".csv"
+
+    if os.path.exists(candidate):
+        return candidate
+
+    # Return the expected path so safe_load gives a clear error.
+    return candidate
 
 
 # ============================================================
